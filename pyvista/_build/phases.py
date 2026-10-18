@@ -22,6 +22,7 @@ from rich.highlighter import Highlighter
 from rich.markup import escape
 from rich.prompt import Confirm as _RichConfirm
 from rich.prompt import Prompt as _RichPrompt
+from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 
@@ -56,11 +57,11 @@ class _NarrationHighlighter(Highlighter):
 
     rules = (
         (re.compile(r'(https?://|git@)\S*[^\s.,)]'), 'underline blue'),
-        (re.compile(r'(?<![\w/.:])(~|/)[-\w.+~/]*[-\w+~/]'), 'magenta'),
         (re.compile(r'(?<![\w-])--?[a-zA-Z][\w-]*'), 'bold cyan'),
         (re.compile(r'(?<![\w.])v?\d+(\.\d+)*(?!\w)'), 'cyan'),
         (re.compile(r'\b[Ss]kipped\b'), 'yellow'),
     )
+    path = re.compile(r'(?<![\w/.:])(~|/)[-\w.+~/]*[-\w+~/]')
 
     def highlight(self, text: Text) -> None:
         """Apply every rule to the text in place.
@@ -71,6 +72,9 @@ class _NarrationHighlighter(Highlighter):
             Text to color.
 
         """
+        for match in self.path.finditer(text.plain):
+            link = Path(match.group()).expanduser().as_uri()
+            text.stylize(Style(color='magenta', link=link), *match.span())
         for pattern, style in self.rules:
             text.highlight_regex(pattern, style)
 
