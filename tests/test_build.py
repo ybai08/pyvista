@@ -1677,12 +1677,19 @@ def test_plan(tmp_path: Path):
         )
 
 
+def _path_style(path: str) -> str:
+    """Return the style a narrated POSIX path gets, unlinked where it has no file URI."""
+    if os.name == 'nt':
+        return 'magenta'
+    return f'magenta link file://{path}'
+
+
 def test_narration_highlighter_edge_cases(mocker: MockerFixture):
     """Paths stay one span, ``~`` alone is not a path, and an unlinkable path is still colored."""
     text = phases.Text('/a/2026-10/b about ~5 minutes')
     phases._HIGHLIGHT.highlight(text)
     spans = [(text.plain[s.start : s.end], str(s.style)) for s in text.spans]
-    assert spans == [('/a/2026-10/b', 'magenta link file:///a/2026-10/b'), ('5', 'cyan')]
+    assert spans == [('/a/2026-10/b', _path_style('/a/2026-10/b')), ('5', 'cyan')]
     mocker.patch.object(
         phases,
         'Path',
@@ -1704,7 +1711,7 @@ def test_narration_highlighter():
     )
     phases._HIGHLIGHT.highlight(text)
     styled = {text.plain[s.start : s.end]: str(s.style) for s in text.spans}
-    assert styled.pop('/a/b') == 'magenta link file:///a/b'
+    assert styled.pop('/a/b') == _path_style('/a/b')
     assert styled == {
         'https://x.org/vtk.git': 'underline blue',
         '--repair': 'bold cyan',
