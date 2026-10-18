@@ -174,14 +174,19 @@ jobs:
         run: |
           python -m pyvista build vtk $MANYLINUX --yes \
             --source vtk-src --build-dir vtk-build --compiler-cache auto --cache-dir compiler-cache \
-            --no-install --opt smp=Sequential \
             --version-suffix "dev0+g${VTK_NIGHTLY_SHA:0:8}"
 
       - name: Show the full build log
         if: failure()
         shell: bash
         run: |
-          if [ -f vtk-build/build.log ]; then cat vtk-build/build.log; else echo "The build stopped before compiling."; fi
+          if [ ! -f vtk-build/build.log ]; then
+            echo "The build stopped before compiling."
+          elif grep -q '^ninja: build stopped' vtk-build/build.log; then
+            cat vtk-build/build.log
+          else
+            echo "Compiling finished. The failure is in a later step, shown above."
+          fi
 
       # Fork pull requests read the cache but never upload one.
       - name: Upload compiler cache
