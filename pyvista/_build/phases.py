@@ -61,10 +61,10 @@ class _NarrationHighlighter(Highlighter):
         (re.compile(r'(?<![\w.])v?\d+(\.\d+)*(?!\w)'), 'cyan'),
         (re.compile(r'\b[Ss]kipped\b'), 'yellow'),
     )
-    path = re.compile(r'(?<![\w/.:])(~|/)[-\w.+~/]*[-\w+~/]')
+    path = re.compile(r'(?<![\w/.:])(~(?=/)|/)[-\w.+~/]*[-\w+~/]')
 
     def highlight(self, text: Text) -> None:
-        """Apply every rule to the text in place.
+        """Apply every rule to the text in place, leaving paths whole.
 
         Parameters
         ----------
@@ -72,11 +72,19 @@ class _NarrationHighlighter(Highlighter):
             Text to color.
 
         """
+        paths = []
         for match in self.path.finditer(text.plain):
-            link = Path(match.group()).expanduser().as_uri()
+            try:
+                link = Path(match.group()).expanduser().as_uri()
+            except (ValueError, RuntimeError):
+                link = None
             text.stylize(Style(color='magenta', link=link), *match.span())
+            paths.append(match.span())
         for pattern, style in self.rules:
-            text.highlight_regex(pattern, style)
+            for match in pattern.finditer(text.plain):
+                start, end = match.span()
+                if not any(a <= start < b for a, b in paths):
+                    text.stylize(style, start, end)
 
 
 _HIGHLIGHT = _NarrationHighlighter()
