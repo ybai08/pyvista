@@ -28,12 +28,13 @@ command runs:
     pyvista build vtk --interactive
 
 Build a different backend, such as the `cvista <https://github.com/pyvista/cvista>`_
-fork (see :ref:`vtk_backend_install`), or your own fork of VTK:
+fork (see :ref:`vtk_backend`), or your own fork of VTK in its own build
+directory:
 
 .. code-block:: bash
 
     pyvista build cvista
-    pyvista build vtk --url https://github.com/me/vtk.git --ref my-branch
+    pyvista build vtk --url https://github.com/me/vtk.git --ref my-branch --build-dir vtk-fork-build
 
 Build without being asked, for scripts and CI. The list of what gets
 installed is still printed:
@@ -42,7 +43,7 @@ installed is still printed:
 
     pyvista build vtk --yes
 
-Build VTK's ``master`` branch, or any tag or commit:
+Build VTK's ``master`` branch, or any tag, branch, or commit:
 
 .. code-block:: bash
 

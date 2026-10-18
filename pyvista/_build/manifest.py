@@ -9,6 +9,9 @@ import tomllib
 from typing import TYPE_CHECKING
 from typing import Any
 
+from packaging.specifiers import InvalidSpecifier
+from packaging.specifiers import SpecifierSet
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -338,9 +341,13 @@ def parse_manifest(data: dict[str, Any], path: Path | None = None) -> Manifest:
     if version_command is not None:
         _check_placeholders(version_command, PLACEHOLDERS, where='[backend] version_command')
     tools = _table(data, 'tools', where='manifest')
-    if not all(isinstance(v, str) for v in tools.values()):
-        msg = '[tools]: every entry must be a version specifier string.'
-        raise ManifestError(msg)
+    _check_keys(tools, ('cmake', 'ninja'), where='[tools]')
+    for name, spec in tools.items():
+        try:
+            SpecifierSet(spec)
+        except (InvalidSpecifier, TypeError):
+            msg = f'[tools] {name}: {spec!r} is not a version specifier such as ">=3.22".'
+            raise ManifestError(msg) from None
     cmake = _table(data, 'cmake', where='manifest')
     _check_keys(cmake, ('common', 'init_cache', *OS_NAMES), where='[cmake]')
     init_cache = _table(cmake, 'init_cache', where='[cmake]')
@@ -476,7 +483,9 @@ def resolve_groups(
 
     enabled: list[str] = []
     for group in available.values():
-        on = group.required or all_ or (group.default and not minimal)
+        on = group.required or (group.default and not minimal)
+        if all_ and not on and not set(group.conflicts) & set(enabled):
+            on = True
         if group.name in (without or []):
             if group.required:
                 msg = f'Group {group.name!r} is required and cannot be disabled.'

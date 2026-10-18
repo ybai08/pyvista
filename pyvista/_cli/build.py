@@ -8,6 +8,7 @@ from typing import Annotated
 from typing import Literal
 
 from cyclopts import Parameter
+from cyclopts import validators
 from rich.markup import escape
 
 import pyvista as pv
@@ -77,20 +78,27 @@ def _build(
     ] = False,
     opt: Annotated[
         list[str] | None,
-        Parameter(negative='', help='Set a manifest option, ``NAME=VALUE``; repeatable.'),
+        Parameter(negative='', help='Set a manifest option, ``NAME=VALUE``. Repeatable.'),
     ] = None,
     build_type: Annotated[
-        Literal['Release', 'RelWithDebInfo', 'Debug'], Parameter(help='CMake build type.')
+        Literal['Release', 'RelWithDebInfo', 'Debug'],
+        Parameter(help='CMake build type: Release, RelWithDebInfo, or Debug.'),
     ] = 'Release',
     jobs: Annotated[
-        int | None, Parameter(help='Parallel compile jobs. Defaults to the CPU count.')
+        int | None,
+        Parameter(
+            validator=validators.Number(gte=1),
+            help='Parallel compile jobs. Defaults to the CPU count. Lower it if the build runs '
+            'out of memory.',
+        ),
     ] = None,
     define: Annotated[
         list[str] | None,
         Parameter(
             name=['--define', '-D'],
             negative='',
-            help='Extra CMake cache entry, ``KEY=VALUE``; applied last, overriding the manifest.',
+            help='Extra CMake cache entry, ``KEY=VALUE``, applied last so it overrides the '
+            'manifest.',
         ),
     ] = None,
     clean: Annotated[bool, Parameter(negative='', help='Delete the build tree first.')] = False,
@@ -106,7 +114,10 @@ def _build(
     ] = False,
     compiler_cache: Annotated[
         Literal['auto', 'ccache', 'sccache', 'none'],
-        Parameter(help='Compiler cache, off by default. ``auto`` uses whichever is on PATH.'),
+        Parameter(
+            help='Compiler cache: auto, ccache, sccache, or none (the default). ``auto`` uses '
+            'whichever is on PATH.'
+        ),
     ] = 'none',
     cache_dir: Annotated[
         Path | None,
@@ -118,13 +129,14 @@ def _build(
     build_dir: Annotated[
         Path | None,
         Parameter(
-            help='Where source, build tree and wheels go. Defaults to ``./<backend>-build``.'
+            help='Where source, build tree, and wheels go. Defaults to ``./<backend>-build``.'
         ),
     ] = None,
     version_suffix: Annotated[
         str | None,
         Parameter(
-            help='Wheel version suffix. Defaults to ``dev0+g<sha>`` unless ``--ref`` is a tag.'
+            help='Wheel version suffix. Defaults to ``dev0+g<sha>``, or none when the '
+            'checkout is at a tag.'
         ),
     ] = None,
     repair: Annotated[

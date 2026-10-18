@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from typing import TYPE_CHECKING
 
 import pytest
@@ -332,12 +333,24 @@ def test_source_dir_that_is_not_a_checkout(tmp_path: Path, mocker: MockerFixture
 
 
 @pytest.mark.usefixtures('no_tools')
-def test_url_with_existing_checkout_is_reported(tmp_path: Path):
+def test_url_with_existing_checkout_stops(tmp_path: Path, mocker: MockerFixture):
+    """A ``--url`` the existing checkout was not cloned from stops before anything runs."""
     cfg = _config(tmp_path, url='https://example.com/f.git')
     (cfg.src_dir / '.git').mkdir(parents=True)
-    console = Console(record=True, width=4000, force_terminal=False)
-    Builder(cfg, console).phase_source()
-    assert '--url is not used: the checkout at' in console.export_text()
+    builder = Builder(cfg, Console(quiet=True))
+    git = mocker.patch.object(builder, 'git', return_value='https://example.com/vtk.git')
+    with pytest.raises(
+        phases.BuildError, match=r'checkout of https://example\.com/vtk\.git already'
+    ):
+        builder.plan()
+    with pytest.raises(phases.BuildError, match='--url is not used'):
+        builder.phase_source()
+    git.side_effect = subprocess.CalledProcessError(2, 'git')
+    with pytest.raises(phases.BuildError, match='checkout of another URL'):
+        builder.plan()
+    git.side_effect = None
+    git.return_value = cfg.url
+    assert builder._unused_url() is None
 
 
 def test_parse_flags_inline_values():
@@ -350,7 +363,22 @@ def test_configure_walk_keeps_spaces_in_defines(tmp_path: Path, mocker: MockerFi
     cfg = _config(tmp_path, compiler_cache='none', version_suffix='')
     builder = Builder(cfg, Console(quiet=True))
     builder._manifest = phases.find_manifest('vtk', None)
-    answers = iter(['Release', 'none', '', 'X="a b" Y=2', 'Release', 'none', '', '"X=1'])
+    answers = iter(
+        [
+            'Release',
+            'none',
+            '',
+            'X="a b" Y=2',
+            'Release',
+            'none',
+            '-',
+            '"X=1',
+            'Debug',
+            'none',
+            '-',
+            '-',
+        ]
+    )
     defaults = []
 
     def ask(*_, default='', **__):
@@ -364,6 +392,10 @@ def test_configure_walk_keeps_spaces_in_defines(tmp_path: Path, mocker: MockerFi
         builder._walk_configure_settings()
     assert defaults[-1] == "'X=a b' Y=2"
     assert cfg.defines == ['X=a b', 'Y=2']
+    builder._walk_configure_settings()
+    assert cfg.defines == []
+    assert cfg.version_suffix == ''
+    assert defaults[-2] == '-'
 
 
 def test_prompts_print_brackets_verbatim():
@@ -442,7 +474,9 @@ def test_existing_checkout_declined(tmp_path: Path, mocker: MockerFixture):
 def test_interactive_selection_parse_errors(tmp_path: Path, mocker: MockerFixture):
     """An unbalanced quote or a clashing flag is reported and leaves the selection as it was."""
     mocker.patch.object(phases.sys.stdin, 'isatty', return_value=True)
-    answers = iter(['y', '--with "web', '--minimal', '--all', ''])
+    answers = iter(
+        ['y', '--with "web', '--all --minimal', '--with headless-egl --with headless-osmesa', '']
+    )
     mocker.patch.object(
         phases.Prompt, 'ask', side_effect=lambda *_, default='', **__: next(answers) or default
     )
