@@ -88,8 +88,8 @@ def _build(
         int | None,
         Parameter(
             validator=validators.Number(gte=1),
-            help='Parallel compile jobs. Defaults to the CPU count. Lower it if the build runs '
-            'out of memory.',
+            help='Parallel compile jobs. Defaults to one per CPU core, at most one per 2 GB of '
+            'memory.',
         ),
     ] = None,
     define: Annotated[
