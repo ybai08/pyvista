@@ -1,4 +1,4 @@
-"""The build itself: source, tools, groups, configure, build, wheel, repair, install."""
+"""The build itself: tools, source, groups, configure, build, wheel, repair, install."""
 
 from __future__ import annotations
 
