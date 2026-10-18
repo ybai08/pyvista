@@ -173,20 +173,9 @@ jobs:
           MANYLINUX: ${{ runner.os == 'Linux' && '--manylinux' || '' }}
         run: |
           python -m pyvista build vtk $MANYLINUX --yes \
-            --source vtk-src --build-dir vtk-build --compiler-cache auto --cache-dir compiler-cache --no-repair \
+            --source vtk-src --build-dir vtk-build --compiler-cache auto --cache-dir compiler-cache --repair \
             --no-install --opt smp=Sequential \
             --version-suffix "dev0+g${VTK_NIGHTLY_SHA:0:8}"
-
-      - name: Import the unrepaired wheel in a fresh environment
-        shell: bash
-        run: |
-          python -m venv "$RUNNER_TEMP/wheel-check"
-          PY="$RUNNER_TEMP/wheel-check/bin/python"
-          [ -x "$PY" ] || PY="$RUNNER_TEMP/wheel-check/Scripts/python.exe"
-          "$PY" -m pip install --no-deps vtk-build/build/dist/*.whl
-          unzip -l vtk-build/build/dist/*.whl | grep -ciE '\.(so|dylib|dll)' || true
-          cd "$RUNNER_TEMP"
-          "$PY" -c "import vtkmodules.vtkCommonCore as c, vtkmodules.vtkRenderingOpenGL2; print('unrepaired wheel imports', c.vtkVersion.GetVTKVersion())"
 
       - name: Show the full build log
         if: failure()
@@ -208,7 +197,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: vtk-wheel-${{ runner.os }}-py${{ matrix.python-version }}
-          path: vtk-build/build/dist/*.whl
+          path: vtk-build/wheelhouse/*.whl
 
   # Cache pyvista/data for each runner separately
   # Runner labels should match the actual runners used by the different jobs in this file
