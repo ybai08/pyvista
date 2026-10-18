@@ -268,9 +268,16 @@ def _config(tmp_path: Path, **kwargs) -> BuildConfig:
 @pytest.fixture(autouse=True)
 def _no_compiler_cache_env(monkeypatch: pytest.MonkeyPatch):
     """Keep the developer's compiler cache settings out of every test."""
-    for name in list(os.environ):
-        if name.startswith(('CCACHE_', 'SCCACHE_')):
-            monkeypatch.delenv(name)
+    for name in (
+        'CCACHE_BASEDIR',
+        'CCACHE_COMPILERCHECK',
+        'CCACHE_CONFIGPATH',
+        'CCACHE_DIR',
+        'CCACHE_LOGFILE',
+        'CCACHE_NOHASHDIR',
+        'SCCACHE_DIR',
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture
