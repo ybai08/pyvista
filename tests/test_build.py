@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -363,9 +364,15 @@ def test_unknown_backend(tmp_path: Path):
 
 
 def test_missing_git(tmp_path: Path, mocker: MockerFixture):
+    """A missing git stops at the tools step, before anything is cloned."""
     mocker.patch.object(tools.shutil, 'which', return_value=None)
+    builder = Builder(_config(tmp_path), Console(quiet=True))
+    source = mocker.spy(builder, 'phase_source')
+    with pytest.raises(BuildError, match='git: Install git'):
+        builder.build()
+    assert not source.called
     with pytest.raises(BuildError, match='git was not found'):
-        Builder(_config(tmp_path), Console(quiet=True)).build()
+        builder.phase_source()
 
 
 def test_blocking_tool(tmp_path: Path, mocker: MockerFixture):
@@ -1073,7 +1080,7 @@ def test_intro_explains_and_asks(tmp_path: Path, mocker: MockerFixture):
     out = console.export_text()
     assert out.splitlines()[1] == 'The build runs these eight steps:'
     assert 'asks before running' not in out
-    assert out.index('Proceed?') < out.index('1/8 Source')
+    assert out.index('Proceed?') < out.index('1/8 Tools') < out.index('2/8 Source')
     mocker.patch.object(phases.sys.stdin, 'isatty', return_value=True)
     mocker.patch.object(phases.Confirm, 'ask', return_value=False)
     builder = Builder(_config(tmp_path, interactive=True, dry_run=False), console)
@@ -1245,13 +1252,15 @@ def test_compiler_cache_tool_missing(mocker: MockerFixture):
 def test_build_asks_for_jobs(tmp_path: Path, mocker: MockerFixture):
     mocker.patch.object(phases.sys.stdin, 'isatty', return_value=True)
     mocker.patch.object(phases.os, 'cpu_count', return_value=8)
+    mocker.patch.object(tools, 'physical_memory', return_value=64 * 2**30)
     builder = _builder(tmp_path, mocker)
     builder.config.interactive = True
     run = mocker.patch.object(builder, 'run')
     mocker.patch.object(builder, 'hooks')
     mocker.patch.object(phases.Prompt, 'ask', side_effect=['x', '0', '4'])
     builder.phase_build()
-    assert '8 CPU cores detected; compiling with 8 jobs.' in builder.console.export_text()
+    out = builder.console.export_text()
+    assert '8 CPU cores and 64 GB of memory detected; compiling with 8 jobs.' in out
     assert run.call_args_list[0].args[0][-2:] == ['--parallel', '4']
     mocker.patch.object(phases.Prompt, 'ask', return_value='y')
     builder.phase_build()
@@ -1634,8 +1643,8 @@ def test_plan(tmp_path: Path):
     )
     plan = dict(Builder(cfg, Console(quiet=True)).plan())
     assert list(plan) == [
-        'Source',
         'Tools',
+        'Source',
         'Build options',
         'Configure',
         'Build',
@@ -1804,6 +1813,7 @@ def test_container_build_leaves_start_and_install_to_the_host(
         for name in (
             'confirm_start',
             'phase_source',
+            'recheck_tools',
             'phase_tools',
             'phase_groups',
             'phase_configure',
@@ -1844,3 +1854,103 @@ def test_ccache_basedir_across_drives(tmp_path: Path, mocker: MockerFixture):
     builder.env.pop('CCACHE_BASEDIR', None)
     builder._activate_compiler_cache()
     assert 'CCACHE_BASEDIR' not in builder.env
+
+
+@pytest.fixture(autouse=True)
+def _unknown_memory(mocker: MockerFixture):
+    """Make the default job count one per core, whatever memory the test machine has."""
+    mocker.patch.object(tools, 'physical_memory', return_value=None)
+
+
+def test_default_jobs_follow_memory(tmp_path: Path, mocker: MockerFixture):
+    """The default job count is one per core, at most one per 2 GB of memory."""
+    gib = 2**30
+    assert tools.default_jobs(8, None) == 8
+    assert tools.default_jobs(0, None) == 1
+    assert tools.default_jobs(8, 64 * gib) == 8
+    assert tools.default_jobs(16, 24 * gib) == 12
+    assert tools.default_jobs(8, gib) == 1
+    mocker.patch.object(phases.os, 'cpu_count', return_value=16)
+    mocker.patch.object(tools, 'physical_memory', return_value=8 * gib)
+    builder = _builder(tmp_path, mocker)
+    mocker.patch.object(builder, 'run')
+    mocker.patch.object(builder, 'hooks')
+    builder.config.yes = True
+    builder.phase_build()
+    out = builder.console.export_text()
+    assert '16 CPU cores and 8 GB of memory detected; compiling with 4 jobs, one per 2 GB' in out
+    assert dict(builder.plan())['Build'].startswith(
+        'compile with 4 parallel jobs (one per 2 GB of memory)'
+    )
+    builder.config.jobs = 6
+    assert dict(builder.plan())['Build'].startswith('compile with 6 parallel jobs, logging')
+
+
+def test_physical_memory(mocker: MockerFixture):
+    """Physical memory comes from sysconf, or GlobalMemoryStatusEx on Windows."""
+    mocker.stopall()
+    if sys.platform != 'win32':
+        assert tools.physical_memory() > 0
+    mocker.patch.object(tools.os, 'sysconf', side_effect=ValueError)
+    mocker.patch.object(tools.sys, 'platform', 'linux')
+    assert tools.physical_memory() is None
+    import ctypes
+
+    def status(ref):
+        ref._obj.ullTotalPhys = 16 * 2**30
+        return 1
+
+    kernel32 = mocker.Mock(**{'GlobalMemoryStatusEx.side_effect': status})
+    mocker.patch.object(ctypes, 'windll', mocker.Mock(kernel32=kernel32), create=True)
+    mocker.patch.object(tools.sys, 'platform', 'win32')
+    assert tools.physical_memory() == 16 * 2**30
+    kernel32.GlobalMemoryStatusEx.side_effect = None
+    kernel32.GlobalMemoryStatusEx.return_value = 0
+    assert tools.physical_memory() is None
+
+
+def test_recheck_tools_after_clone(tmp_path: Path, mocker: MockerFixture):
+    """Tool versions only the cloned manifest asks for are checked after the clone."""
+    builder = _builder(tmp_path, mocker)
+    shipped = builder.manifest
+    run = mocker.patch.object(builder, 'run')
+    confirm = mocker.patch.object(builder, 'confirm_installs')
+    builder.recheck_tools()
+    assert not run.called
+    builder._checked_tools = dict(shipped.tools)
+    builder.recheck_tools()
+    assert not run.called
+
+    builder._manifest = replace(shipped, tools={**shipped.tools, 'cmake': '>=99'})
+    detect = mocker.patch.object(tools, 'detect', return_value=True)
+    builder.recheck_tools()
+    assert "The checkout's manifest asks for cmake>=99" in builder.console.export_text()
+    assert not run.called
+    assert builder._checked_tools['cmake'] == '>=99'
+
+    detect.reset_mock()
+    builder._checked_tools = {}
+    builder._manifest = replace(shipped, tools={'cmake': '', 'ninja': ''})
+    builder.recheck_tools()
+    assert not detect.called
+
+    builder._checked_tools = {}
+    builder._manifest = replace(shipped, tools={'cmake': '>=99'})
+    detect.return_value = False
+    mocker.patch.object(tools, 'pip_install_command', return_value=None)
+    with pytest.raises(BuildError, match='no pip or uv found'):
+        builder.recheck_tools()
+    builder._checked_tools = {}
+    mocker.patch.object(tools, 'pip_install_command', return_value=['pip', 'install'])
+    with pytest.raises(BuildError, match='Still not usable after install: cmake>=99'):
+        builder.recheck_tools()
+    assert confirm.call_args.args[0] == [f'cmake>=99 into {sys.prefix}']
+    builder._checked_tools = {}
+    detect.side_effect = [False, True]
+    builder.recheck_tools()
+    assert run.call_args.args[0] == ['pip', 'install']
+    builder._checked_tools = {}
+    builder.config.dry_run = True
+    detect.side_effect = None
+    builder.recheck_tools()
+    assert run.call_count == 3
