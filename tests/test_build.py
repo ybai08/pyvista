@@ -1657,6 +1657,26 @@ def test_plan(tmp_path: Path):
         )
 
 
+def test_narration_highlighter_edge_cases(mocker: MockerFixture):
+    """Paths stay one span, ``~`` alone is not a path, and an unlinkable path is still colored."""
+    text = phases.Text('/a/2026-10/b about ~5 minutes')
+    phases._HIGHLIGHT.highlight(text)
+    spans = [(text.plain[s.start : s.end], str(s.style)) for s in text.spans]
+    assert spans == [('/a/2026-10/b', 'magenta link file:///a/2026-10/b'), ('5', 'cyan')]
+    mocker.patch.object(
+        phases,
+        'Path',
+        return_value=mocker.Mock(
+            **{
+                'expanduser.return_value.as_uri.side_effect': ValueError,
+            }
+        ),
+    )
+    text = phases.Text('flags /MP')
+    phases._HIGHLIGHT.highlight(text)
+    assert [str(s.style) for s in text.spans] == ['magenta']
+
+
 def test_narration_highlighter():
     """URLs, paths, flags and versions get a style, other words do not."""
     text = phases.Text(
