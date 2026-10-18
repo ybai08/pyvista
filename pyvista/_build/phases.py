@@ -1,4 +1,4 @@
-"""The build itself: source, tools, groups, configure, build, wheel, repair, install."""
+"""The build itself: tools, source, groups, configure, build, wheel, repair, install."""
 
 from __future__ import annotations
 
@@ -216,6 +216,7 @@ class Builder:
         self.env: dict[str, str] = dict(os.environ)
         self.env['PATH'] = f'{_tools.scripts_dir()}{os.pathsep}{self.env.get("PATH", "")}'
         self._manifest: Manifest | None = None
+        self._checked_tools: dict[str, str] | None = None
         self.groups: list[str] = []
         self.option_values: dict[str, bool | int | str] = {}
         self.launcher: _tools.Tool | None = None
@@ -385,9 +386,11 @@ class Builder:
             f'. Compiler cache (--compiler-cache): '
             f'{cache.get(cfg.compiler_cache, cfg.compiler_cache)}'
         )
-        jobs = cfg.jobs or os.cpu_count() or 1
+        jobs, cores, _ = self._jobs()
+        limit = ', one per 2 GB of memory' if not cfg.jobs and jobs < cores else ''
         build = (
-            f'compile with {jobs} parallel jobs (--jobs), logging to {cfg.build_dir / "build.log"}'
+            f'compile with {jobs} parallel jobs (--jobs){limit}, logging to '
+            f'{cfg.build_dir / "build.log"}'
         )
         wheel = f'package the wheel with setup.py bdist_wheel into {cfg.dist_dir}'
         if cfg.repair:
@@ -404,8 +407,8 @@ class Builder:
         else:
             install = 'skipped. The install command is printed at the end, or pass --install'
         return [
-            ('Source', source),
             ('Tools', tools_text),
+            ('Source', source),
             ('Build options', options_text),
             ('Configure', configure),
             ('Build', build),
@@ -584,7 +587,7 @@ class Builder:
             return self.build_in_manylinux()
         if self.config.prompting:
             self.say(
-                'Eight steps: source, tools, build options, configure, build, wheel, repair, '
+                'Eight steps: tools, source, build options, configure, build, wheel, repair, '
                 'and install.'
             )
         else:
@@ -599,8 +602,9 @@ class Builder:
             )
         if not self.config.in_container:
             self.confirm_start()
-        self.phase_source()
         self.phase_tools()
+        self.phase_source()
+        self.recheck_tools()
         self.phase_groups()
         self.phase_configure()
         self.phase_build()
@@ -614,7 +618,7 @@ class Builder:
     def phase_source(self) -> None:
         """Clone or reuse the checkout, then load its manifest."""
         cfg = self.config
-        self.step('1/8 Source')
+        self.step('2/8 Source')
         git = _tools.git_tool()
         if not _tools.detect(git, self.env):
             msg = f'git was not found on PATH. {git.instructions}'
@@ -858,8 +862,10 @@ class Builder:
     def phase_tools(self) -> None:
         """Check every tool, then install what is missing after one confirmation."""
         cfg = self.config
-        self.step('2/8 Tools')
-        tools = _tools.required_tools(cfg.os_name, self.manifest.tools, repair=cfg.repair)
+        self.step('1/8 Tools')
+        manifest = self._manifest or self._planned_manifest()
+        self._checked_tools = dict(manifest.tools) if manifest else {}
+        tools = _tools.required_tools(cfg.os_name, self._checked_tools, repair=cfg.repair)
         self._activate_msvc(tools)
         table = Table(show_header=True, header_style='bold purple')
         table.add_column('Tool')
@@ -1004,6 +1010,41 @@ class Builder:
             if base != Path(base.anchor):
                 self.env.setdefault('CCACHE_BASEDIR', str(base))
                 self.env.setdefault('CCACHE_NOHASHDIR', '1')
+
+    def recheck_tools(self) -> None:
+        """Check again the tool versions the checkout's manifest asks for, if they changed."""
+        cfg = self.config
+        specs = self.manifest.tools
+        if self._checked_tools is None or dict(specs) == self._checked_tools:
+            return
+        tools = [
+            t
+            for t in _tools.required_tools(cfg.os_name, specs, repair=False)
+            if t.spec and t.spec != self._checked_tools.get(t.name, '')
+        ]
+        self._checked_tools = dict(specs)
+        if not tools:
+            return
+        labels = ', '.join(t.label for t in tools)
+        self.say(f"The checkout's manifest asks for {escape(labels)}. Checking them again.")
+        missing = [t for t in tools if not _tools.detect(t, self.env)]
+        if not missing:
+            return
+        wanted = [f'{t.pip}{t.spec}' for t in missing]
+        cmd = _tools.pip_install_command(*wanted)
+        if cmd is None:
+            msg = (
+                f'Install {", ".join(wanted)} into {sys.prefix} and run again '
+                '(no pip or uv found).'
+            )
+            raise BuildError(msg)
+        self.confirm_installs([f'{spec} into {sys.prefix}' for spec in wanted])
+        self.run(cmd)
+        if not cfg.dry_run:
+            bad = [t.label for t in missing if not _tools.detect(t, self.env)]
+            if bad:
+                msg = f'Still not usable after install: {", ".join(bad)}.'
+                raise BuildError(msg)
 
     def install_plan(self, specs: Sequence[str]) -> list[str]:
         """Return one line per thing the build installs.
@@ -1453,11 +1494,18 @@ class Builder:
         """Compile with ninja through cmake."""
         cfg = self.config
         self.step('5/8 Build')
-        cores = os.cpu_count() or 1
-        jobs = cfg.jobs or cores
-        flag = ' (--jobs)' if cfg.jobs else ''
+        jobs, cores, memory = self._jobs()
+        found = f'{cores} CPU cores'
+        if memory is not None:
+            found += f' and {memory / 2**30:.0f} GB of memory'
+        if cfg.jobs:
+            why = ' (--jobs)'
+        elif jobs < cores:
+            why = ', one per 2 GB of memory so the compilers do not run out of it'
+        else:
+            why = ''
         self.say(
-            f'{cores} CPU cores detected; compiling with [bold]{jobs}[/bold] jobs{flag}. '
+            f'{found} detected; compiling with [bold]{jobs}[/bold] jobs{why}. '
             'A full VTK build takes tens of minutes to hours.'
         )
         jobs = self._ask_jobs(jobs)
@@ -1468,6 +1516,12 @@ class Builder:
         if self.launcher is not None:
             self.run([self.launcher.name, '--show-stats'], fatal=False)
         self.hooks('post_build')
+
+    def _jobs(self) -> tuple[int, int, int | None]:
+        """Return the job count, the CPU cores and the physical memory it was chosen from."""
+        cores = os.cpu_count() or 1
+        memory = _tools.physical_memory()
+        return self.config.jobs or _tools.default_jobs(cores, memory), cores, memory
 
     def _ask_jobs(self, jobs: int) -> int:
         """Confirm the build, taking a number as the job count instead of a yes.

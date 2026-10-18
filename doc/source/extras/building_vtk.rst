@@ -43,15 +43,11 @@ mechanism once installed: see :envvar:`PYVISTA_VTK_BACKEND` and
 
 The Steps
 ~~~~~~~~~
-1. **Source.** VTK is cloned into ``./vtk-build/src`` at the release tag
-   PyVista supports. Use ``--ref`` for another tag, branch, or commit,
-   ``--build-dir`` to put everything somewhere else, and ``--source DIR``
-   to build a checkout you already have. An existing checkout is reused
-   as is, local edits included.
-2. **Tools.** ``git``, ``cmake``, ``ninja``, a C++ compiler, and the
-   wheel repair tool are checked (see :ref:`build_tooling`
-   for what each one does). Everything the build would install is then
-   listed, each item with where it goes: ``cmake``, ``ninja``, and the
+1. **Tools.** ``git``, ``cmake``, ``ninja``, a C++ compiler, and the
+   wheel repair tool are checked before anything is downloaded (see
+   :ref:`build_tooling` for what each one does). Everything the build
+   would install is then listed, each item with where it goes:
+   ``cmake``, ``ninja``, and the
    repair tool when missing or too old, ``setuptools`` and ``wheel``, and
    the finished wheel with ``--install``. One confirmation covers the
    whole list, and ``--yes`` answers it in advance. Without a terminal
@@ -59,7 +55,15 @@ The Steps
    missing compiler stops with instructions for your operating system.
    On Windows, Visual Studio's build environment is imported
    automatically. ``--compiler-cache auto`` adds a compiler cache
-   (``ccache`` or ``sccache``) when one is on ``PATH``.
+   (``ccache`` or ``sccache``) when one is on ``PATH``. When the cloned
+   source asks for other ``cmake`` or ``ninja`` versions than the ones
+   checked, as on a first ``cvista`` build, those are checked again
+   after step 2.
+2. **Source.** VTK is cloned into ``./vtk-build/src`` at the release tag
+   PyVista supports. Use ``--ref`` for another tag, branch, or commit,
+   ``--build-dir`` to put everything somewhere else, and ``--source DIR``
+   to build a checkout you already have. An existing checkout is reused
+   as is, local edits included.
 3. **Build options.** On top of the modules every build has, the
    modules to build are organized into named groups. The default set
    matches the stock wheel plus what PyVista's CI enables:
@@ -94,12 +98,15 @@ The Steps
    ``-D`` change one directly. Then ``cmake`` runs. Every command is
    printed in full before it runs.
 5. **Build** runs ``ninja`` and logs the full output to ``build.log``.
+   It runs one compile job per CPU core, at most one per 2 GB of
+   memory, since each job can take that much. ``--jobs`` sets the
+   number instead.
 6. **Wheel** runs ``setup.py bdist_wheel`` in the build tree.
 7. **Repair** bundles the libraries the wheel links against and sets its
    platform tag, so it installs outside the build tree and on other
    machines. ``--no-repair`` skips it.
 8. **Install** installs the wheel into the current environment with
-   ``--install``, which is part of the confirmation in step 2. Without it,
+   ``--install``, which is part of the confirmation in step 1. Without it,
    ``--interactive`` offers to, and otherwise the wheel's path and the
    ``pip`` command are printed.
 
