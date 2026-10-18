@@ -20,9 +20,10 @@ PyVista ships a command that does this for you:
 It works on Linux, macOS, and Windows and follows the official `Building
 VTK <https://docs.vtk.org/en/latest/build_instructions/index.html>`_
 instructions, with the options PyVista's own CI uses. By default it
-builds with those defaults straight through, printing every command as
-it runs. Anything it has to install is listed first and confirmed once,
-and ``--yes`` answers that question in advance. Add ``--interactive`` to
+says where the build goes and asks once before starting, then builds
+with those defaults straight through, printing every command as it
+runs. Anything it has to install is listed and confirmed too, and
+``--yes`` answers both questions in advance. Add ``--interactive`` to
 walk through the build one step at a
 time: each step shows its settings, says what it is about to do and
 where, and waits for a yes. Press Enter to accept the default, answer
@@ -87,9 +88,10 @@ The Steps
 
 Scripted Use
 ~~~~~~~~~~~~
-Without ``--interactive`` the only question is the install confirmation,
-and only when something is missing. Pass ``--yes`` in CI and scripts to
-answer it. ``--dry-run`` prints the commands, and the install list,
+Without ``--interactive`` the command asks before it starts, and again
+before installing anything that is missing. Without a terminal it stops
+at the first question, so pass ``--yes`` in CI and scripts to answer
+both. ``--dry-run`` prints the commands, and the install list,
 without running anything. Optional steps keep their own switches, so
 ``--repair`` adds the repair step and ``--install`` installs the wheel
 at the end.

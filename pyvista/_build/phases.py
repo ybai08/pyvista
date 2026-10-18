@@ -257,6 +257,23 @@ class Builder:
             msg = 'Nothing was installed; install them yourself and run again.'
             raise BuildError(msg)
 
+    def confirm_start(self) -> None:
+        """Say where the build goes and ask before the first step; ``--yes`` answers yes."""
+        cfg = self.config
+        self.say(
+            f'Source, build tree and wheel go in [bold]{escape(str(cfg.build_dir))}[/bold]. '
+            'Compiling takes from minutes to over an hour and needs several GB of disk.'
+        )
+        if (cfg.yes or cfg.dry_run) and not cfg.prompting:
+            self.confirm('Proceed? (n stops)')
+            return
+        if not sys.stdin.isatty():
+            msg = 'Pass --yes to build without a terminal.'
+            raise BuildError(msg)
+        if not Confirm.ask('Proceed? (n stops)', default=True, console=self.console):
+            msg = 'Stopped before the first step.'
+            raise BuildError(msg)
+
     def run(
         self,
         cmd: Sequence[str],
@@ -415,9 +432,7 @@ class Builder:
                 'takes the default shown in parentheses, and each question says what n and any '
                 'other answer do. Ctrl-C stops at any time.'
             )
-        if not self.confirm('Proceed? (n stops)'):
-            msg = 'Stopped before the first step.'
-            raise BuildError(msg)
+        self.confirm_start()
         self.phase_source()
         self.phase_tools()
         self.phase_groups()
@@ -1453,6 +1468,7 @@ class Builder:
             if probe.returncode != 0:
                 msg = 'Docker is installed but its daemon is not running or not reachable.'
                 raise BuildError(msg)
+        self.confirm_start()
         self.phase_source()
         install_here = cfg.install and cfg.os_name == 'linux'
         if install_here and _tools.pip_install_command() is None:
