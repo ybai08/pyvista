@@ -1106,3 +1106,50 @@ def test_build_asks_for_jobs(tmp_path: Path, mocker: MockerFixture):
     mocker.patch.object(phases.Prompt, 'ask', return_value='n')
     with pytest.raises(BuildError, match='Stopped before building'):
         builder.phase_build()
+
+
+def test_plan(tmp_path: Path):
+    """The start summary says what every step does with the given settings."""
+    cfg = _config(
+        tmp_path,
+        repair=True,
+        install=True,
+        jobs=3,
+        defines=['X=1'],
+        without=['web'],
+        ref='v9.7.0',
+    )
+    plan = dict(Builder(cfg, Console(quiet=True)).plan())
+    assert list(plan) == [
+        'Source',
+        'Tools',
+        'Build options',
+        'Configure',
+        'Build',
+        'Wheel',
+        'Repair',
+        'Install',
+    ]
+    assert (
+        plan['Source']
+        == f'clone https://gitlab.kitware.com/vtk/vtk.git at v9.7.0 into {cfg.src_dir}'
+    )
+    assert 'auditwheel' in plan['Tools']
+    assert 'auditwheel' in plan['Repair']
+    assert 'rendering' in plan['Build options']
+    assert 'web' not in plan['Build options']
+    assert plan['Configure'].endswith(', plus -DX=1')
+    assert plan['Build'].startswith('compile with 3 parallel jobs')
+    assert plan['Install'] == f'install the wheel into {sys.prefix}'
+    with pytest.raises(BuildError, match='nope'):
+        Builder(_config(tmp_path, with_=['nope']), Console(quiet=True)).plan()
+
+    (cfg.src_dir / '.git').mkdir(parents=True)
+    (cfg.src_dir / 'pyvista-build.toml').write_text('manifest_version = 99\n')
+    plan = dict(Builder(_config(tmp_path, backend='demo', ref='main'), Console(quiet=True)).plan())
+    assert plan['Source'] == (
+        f'reuse the checkout at {cfg.src_dir}, local edits kept, checked out at main'
+    )
+    assert "checkout's manifest" in plan['Build options']
+    assert plan['Repair'].startswith('skipped')
+    assert plan['Install'].startswith('skipped')
