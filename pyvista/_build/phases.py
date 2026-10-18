@@ -526,8 +526,8 @@ class Builder:
             )
         else:
             self.say('The build runs these eight steps:')
-            for name, text in self.plan():
-                self.say(f'  • [bold]{name}[/bold]: {escape(text)}')
+            for number, (name, text) in enumerate(self.plan(), start=1):
+                self.say(f'  {number}. [bold]{name}[/bold]: {escape(text)}')
         if self.config.prompting:
             self.say(
                 'Each step explains what it will do and asks before running any command; '
