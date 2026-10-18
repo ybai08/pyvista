@@ -1407,7 +1407,7 @@ def test_build_in_manylinux(tmp_path: Path, mocker: MockerFixture):
     assert f'  • the vtk wheel into {sys.prefix}, once it is built' in out
     assert 'Done' in out
 
-    cfg = _config(tmp_path, dry_run=False, manylinux='img', source=src, os_name='macos')
+    cfg = _config(tmp_path, dry_run=False, yes=True, manylinux='img', source=src, os_name='macos')
     builder = Builder(cfg, Console(record=True, width=4000, force_terminal=False))
     run = mocker.patch.object(builder, 'run')
     install = mocker.patch.object(builder, 'phase_install')
@@ -1420,7 +1420,7 @@ def test_build_in_manylinux(tmp_path: Path, mocker: MockerFixture):
     with pytest.raises(BuildError, match='builds use ccache'):
         builder.build()
     builder = Builder(
-        _config(tmp_path, dry_run=False, manylinux='img', source=src, install=True),
+        _config(tmp_path, dry_run=False, yes=True, manylinux='img', source=src, install=True),
         Console(quiet=True),
     )
     mocker.patch.object(tools, 'pip_install_command', return_value=None)
@@ -1448,8 +1448,14 @@ def test_build_in_manylinux_dry_run(tmp_path: Path, mocker: MockerFixture):
     out = console.export_text()
     assert 'Run the build in the container? (n stops) -> yes (dry run)' in out
     assert not (tmp_path / 'vtk-build').exists()
-    builder = Builder(_config(tmp_path, dry_run=False, manylinux='img'), Console(quiet=True))
     mocker.patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 0))
+    builder = Builder(_config(tmp_path, dry_run=False, manylinux='img'), Console(quiet=True))
+    mocker.patch.object(builder, 'phase_source', side_effect=AssertionError)
+    with pytest.raises(BuildError, match='Pass --yes'):
+        builder.build()
+    builder = Builder(
+        _config(tmp_path, dry_run=False, yes=True, manylinux='img'), Console(quiet=True)
+    )
     run = mocker.patch.object(builder, 'run')
     mocker.patch.object(builder, 'confirm', side_effect=lambda q, **_: 'container' not in q)
     with pytest.raises(BuildError, match='Stopped before the container build'):
@@ -1507,6 +1513,7 @@ def test_build_in_manylinux_forwarded_args(tmp_path: Path, mocker: MockerFixture
     cfg = _config(
         tmp_path,
         dry_run=False,
+        yes=True,
         manylinux='img',
         url='https://x/vtk.git',
         ref='v1',

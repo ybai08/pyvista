@@ -1104,6 +1104,7 @@ class Builder:
             if probe.returncode != 0:
                 msg = 'Docker is installed but its daemon is not running or not reachable.'
                 raise BuildError(msg)
+        self.confirm_start()
         self.phase_source()
         install_here = cfg.install and cfg.os_name == 'linux'
         if install_here and _tools.pip_install_command() is None:
