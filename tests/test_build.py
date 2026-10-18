@@ -308,6 +308,7 @@ def test_dry_run_flags(tmp_path: Path):
         ref='main',
         version_suffix='',
         options=['smp=TBB'],
+        repair=False,
     )
     Builder(cfg, console).build()
     out = console.export_text()
@@ -317,7 +318,7 @@ def test_dry_run_flags(tmp_path: Path):
     assert '-DVTK_GROUP_ENABLE_Rendering=NO' in out
     assert '-DVTK_SMP_IMPLEMENTATION_TYPE=TBB' in out
     assert '-DVTK_VERSION_SUFFIX= ' in out
-    assert 'Skipped. --repair' in out
+    assert 'Skipped (--no-repair).' in out
 
 
 @pytest.mark.usefixtures('no_tools')
@@ -1146,12 +1147,16 @@ def test_plan(tmp_path: Path):
 
     (cfg.src_dir / '.git').mkdir(parents=True)
     (cfg.src_dir / 'pyvista-build.toml').write_text('manifest_version = 99\n')
-    plan = dict(Builder(_config(tmp_path, backend='demo', ref='main'), Console(quiet=True)).plan())
+    plan = dict(
+        Builder(
+            _config(tmp_path, backend='demo', ref='main', repair=False), Console(quiet=True)
+        ).plan()
+    )
     assert plan['Source'] == (
         f'reuse the checkout at {cfg.src_dir}, local edits kept, checked out at main'
     )
     assert "checkout's manifest" in plan['Build options']
-    assert plan['Repair'].startswith('skipped')
+    assert plan['Repair'].startswith('skipped (--no-repair)')
     assert plan['Install'].startswith('skipped')
 
 

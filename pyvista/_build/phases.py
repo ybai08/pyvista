@@ -140,7 +140,7 @@ class BuildConfig:
     reconfigure: bool = False
     update: bool = False
     version_suffix: str | None = None
-    repair: bool = False
+    repair: bool = True
     install: bool = False
     yes: bool = False
     interactive: bool = False
@@ -341,10 +341,11 @@ class Builder:
             repairer = _tools.required_tools(cfg.os_name, {}, repair=True)[-1].name
             repair = (
                 f'bundle the libraries the wheel links against with {repairer}, '
-                f'into {cfg.wheelhouse}'
+                f'into {cfg.wheelhouse}, so it installs on other machines. '
+                '--no-repair skips it'
             )
         else:
-            repair = 'skipped. --repair bundles the libraries the wheel links against'
+            repair = 'skipped (--no-repair), so the wheel may only work on this machine'
         if cfg.install:
             install = f'install the wheel into {sys.prefix}'
         else:
@@ -1041,7 +1042,7 @@ class Builder:
         cfg = self.config
         self.step('7/8 Repair')
         if not cfg.repair:
-            self.say('Skipped. --repair bundles the system libraries the wheel links against.')
+            self.say('Skipped (--no-repair).')
             return
         self.say(
             'Repairing bundles the libraries the wheel links against from outside it, '
@@ -1055,7 +1056,7 @@ class Builder:
         if not self.confirm('Repair the wheel?'):
             self.say('Skipped.')
             return
-        wheel = self.wheel or cfg.dist_dir / '<backend>-*.whl'
+        wheel = self.wheel or cfg.dist_dir / f'{cfg.backend}-*.whl'
         cmd, env = self.repair_command(wheel)
         self.run(cmd, env=env)
         if not cfg.dry_run:
@@ -1081,7 +1082,9 @@ class Builder:
         """Install the wheel into the current environment when asked."""
         cfg = self.config
         self.step('8/8 Install')
-        wheel = self.wheel or cfg.wheelhouse / '<backend>-*.whl'
+        wheel = self.wheel or (cfg.wheelhouse if cfg.repair else cfg.dist_dir) / (
+            f'{cfg.backend}-*.whl'
+        )
         cmd = self.install_command(wheel)
         if cmd is None:
             self.say(f'No pip or uv found; install the wheel yourself: {wheel}')
