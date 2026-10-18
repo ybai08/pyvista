@@ -45,8 +45,8 @@ The Steps
    PyVista supports. Use ``--ref`` for another tag, branch or commit, and
    ``--build-dir`` to put everything somewhere else. An existing checkout
    is reused as is, local edits included.
-2. **Tools.** ``git``, ``cmake``, ``ninja``, a C++ compiler and, when the
-   wheel is repaired, the repair tool are checked (see :ref:`build_tooling`
+2. **Tools.** ``git``, ``cmake``, ``ninja``, a C++ compiler and the
+   wheel repair tool are checked (see :ref:`build_tooling`
    for what each one does). Everything the build would install is then
    listed, each item with where it goes: ``cmake``, ``ninja`` and the
    repair tool when missing or too old, ``setuptools`` and ``wheel``, and
@@ -77,10 +77,9 @@ The Steps
    printed in full before it runs.
 5. **Build** runs ``ninja`` and logs the full output to ``build.log``.
 6. **Wheel** runs ``setup.py bdist_wheel`` in the build tree.
-7. **Repair** runs with ``--repair``: it bundles the libraries the wheel
-   links against and sets its platform tag, so it installs on other
-   machines. The wheel installs and runs on the machine that built it
-   without this step.
+7. **Repair** bundles the libraries the wheel links against and sets its
+   platform tag, so it installs outside the build tree and on other
+   machines. ``--no-repair`` skips it.
 8. **Install** installs the wheel into the current environment with
    ``--install``, which is part of the confirmation in step 2. Without it,
    ``--interactive`` offers to, and otherwise the wheel's path and the
@@ -93,8 +92,8 @@ before installing anything that is missing. Without a terminal it stops
 at the first question, so pass ``--yes`` in CI and scripts to answer
 both. ``--dry-run`` prints the commands, and the install list,
 without running anything. Optional steps keep their own switches, so
-``--repair`` adds the repair step and ``--install`` installs the wheel
-at the end.
+``--no-repair`` skips the repair step and ``--install`` installs the
+wheel at the end.
 
 .. code-block:: bash
 
@@ -171,7 +170,7 @@ running:
 
 .. code-block:: bash
 
-    pyvista build vtk --manylinux --repair
+    pyvista build vtk --manylinux
 
 The container image matches your machine's architecture
 (``manylinux_2_28_x86_64`` or ``manylinux_2_28_aarch64``) and carries
@@ -179,7 +178,7 @@ the same Python version as the one running the command. The source is
 cloned or updated on your machine first. The container then installs
 VTK's build dependencies and PyVista's requirements, mounts the PyVista
 you are running read-only, and runs the remaining steps with the source
-and ``./vtk-build`` mounted. ``--repair`` runs ``auditwheel`` there,
+and ``./vtk-build`` mounted. The repair step runs ``auditwheel`` there,
 which gives the wheel its ``manylinux`` tag and puts it in
 ``vtk-build/wheelhouse``.
 Files written by the container are handed back to your user, even when
@@ -224,7 +223,7 @@ What the command looks for and offers to install:
   <https://github.com/pypa/auditwheel>`_ on Linux, `delocate
   <https://github.com/matthew-brett/delocate>`_ on macOS and `delvewheel
   <https://github.com/adang1345/delvewheel>`_ on Windows. Installed with
-  ``pip`` when missing and the wheel is repaired.
+  ``pip`` when missing.
 - `setuptools <https://setuptools.pypa.io/>`_ and `wheel
   <https://wheel.readthedocs.io/>`_ are the Python packages that
   ``setup.py bdist_wheel`` needs to package the build tree. Installed

@@ -130,9 +130,10 @@ def _build(
     repair: Annotated[
         bool,
         Parameter(
-            help='Bundle the libraries the wheel links against and tag it for other machines.'
+            help='Bundle the libraries the wheel links against and tag it for other machines. '
+            '``--no-repair`` skips it.'
         ),
-    ] = False,
+    ] = True,
     install: Annotated[
         bool, Parameter(help='Install the built wheel into this environment.')
     ] = False,
