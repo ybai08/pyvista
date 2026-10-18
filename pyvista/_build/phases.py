@@ -252,6 +252,23 @@ class Builder:
             msg = 'Nothing was installed; install them yourself and run again.'
             raise BuildError(msg)
 
+    def confirm_start(self) -> None:
+        """Say where the build goes and ask before the first step; ``--yes`` answers yes."""
+        cfg = self.config
+        self.say(
+            f'Source, build tree and wheel go in [bold]{escape(str(cfg.build_dir))}[/bold]. '
+            'Compiling takes from minutes to over an hour and needs several GB of disk.'
+        )
+        if (cfg.yes or cfg.dry_run) and not cfg.prompting:
+            self.confirm('Proceed?')
+            return
+        if not sys.stdin.isatty():
+            msg = 'Pass --yes to build without a terminal.'
+            raise BuildError(msg)
+        if not Confirm.ask('Proceed?', default=True, console=self.console):
+            msg = 'Stopped before the first step.'
+            raise BuildError(msg)
+
     def run(
         self,
         cmd: Sequence[str],
@@ -409,9 +426,7 @@ class Builder:
                 'Each step explains what it will do and asks before running any command; '
                 'Enter takes the default.'
             )
-        if not self.confirm('Proceed?'):
-            msg = 'Stopped before the first step.'
-            raise BuildError(msg)
+        self.confirm_start()
         self.phase_source()
         self.phase_tools()
         self.phase_groups()
