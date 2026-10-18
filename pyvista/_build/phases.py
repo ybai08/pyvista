@@ -18,9 +18,11 @@ import sys
 from typing import TYPE_CHECKING
 
 from rich.console import Console
+from rich.highlighter import Highlighter
 from rich.markup import escape
 from rich.prompt import Confirm as _RichConfirm
 from rich.prompt import Prompt as _RichPrompt
+from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 
@@ -48,6 +50,36 @@ if TYPE_CHECKING:
 STATE_FILENAME = '.pyvista-build.json'
 BUILD_TYPES = ('Release', 'RelWithDebInfo', 'Debug')
 COMPILER_CACHES = ('auto', 'ccache', 'sccache', 'none')
+
+
+class _NarrationHighlighter(Highlighter):
+    """Color URLs, paths, command-line flags and version numbers."""
+
+    rules = (
+        (re.compile(r'(https?://|git@)\S*[^\s.,)]'), 'underline blue'),
+        (re.compile(r'(?<![\w-])--?[a-zA-Z][\w-]*'), 'bold cyan'),
+        (re.compile(r'(?<![\w.])v?\d+(\.\d+)*(?!\w)'), 'cyan'),
+        (re.compile(r'\b[Ss]kipped\b'), 'yellow'),
+    )
+    path = re.compile(r'(?<![\w/.:])(~|/)[-\w.+~/]*[-\w+~/]')
+
+    def highlight(self, text: Text) -> None:
+        """Apply every rule to the text in place.
+
+        Parameters
+        ----------
+        text : Text
+            Text to color.
+
+        """
+        for match in self.path.finditer(text.plain):
+            link = Path(match.group()).expanduser().as_uri()
+            text.stylize(Style(color='magenta', link=link), *match.span())
+        for pattern, style in self.rules:
+            text.highlight_regex(pattern, style)
+
+
+_HIGHLIGHT = _NarrationHighlighter()
 _TAG_LIKE = re.compile(r'v?\d+\.\d+')
 _join = subprocess.list2cmdline if os.name == 'nt' else shlex.join
 _NOISY_BUILD_LINE = re.compile(
@@ -116,20 +148,13 @@ class BuildConfig:
     compiler_cache: str = 'none'
     cache_dir: Path | None = None
     version_suffix: str | None = None
-    repair: bool | None = None
+    repair: bool = True
     install: bool = False
     yes: bool = False
     interactive: bool = False
     dry_run: bool = False
     manylinux: str | None = None
     os_name: str = field(default_factory=_tools.host_os)
-
-    @property
-    def repairs(self) -> bool:  # numpydoc ignore=RT01
-        """Whether to repair the wheel: ``repair`` when set, else on Windows or for manylinux."""
-        if self.repair is not None:
-            return self.repair
-        return self.os_name == 'windows' or self.manylinux is not None
 
     @property
     def src_dir(self) -> Path:  # numpydoc ignore=RT01
@@ -214,7 +239,7 @@ class Builder:
             Rich markup to print.
 
         """
-        self.console.print(message, highlight=False)
+        self.console.print(_HIGHLIGHT(Text.from_markup(message)))
 
     def confirm(self, question: str, *, default: bool = True) -> bool:
         """Ask a yes/no question, or take the default when not interactive.
@@ -262,6 +287,112 @@ class Builder:
             raise BuildError(msg)
         if not Confirm.ask('Install them?', default=True, console=self.console):
             msg = 'Nothing was installed; install them yourself and run again.'
+            raise BuildError(msg)
+
+    def _planned_manifest(self) -> Manifest | None:
+        """Return the manifest the build will most likely use, or ``None`` before a clone."""
+        cfg = self.config
+        try:
+            if (cfg.src_dir / '.git').exists():
+                return find_manifest(cfg.backend, cfg.src_dir)
+            if cfg.url is None and shipped_manifest(cfg.backend) is not None:
+                return find_manifest(cfg.backend, None)
+        except ManifestError:
+            pass
+        return None
+
+    def plan(self) -> list[tuple[str, str]]:
+        """Describe what each step will do, before any of them runs.
+
+        Returns
+        -------
+        list[tuple[str, str]]
+            Step name and description, in order.
+
+        """
+        cfg = self.config
+        manifest = self._planned_manifest()
+        if (cfg.src_dir / '.git').exists():
+            source = f'reuse the checkout at {cfg.src_dir}, local edits kept'
+            if cfg.ref:
+                source += f', checked out at {cfg.ref}'
+        else:
+            url = cfg.url or BACKENDS.get(cfg.backend) or (manifest.url if manifest else None)
+            ref = cfg.ref or (manifest.default_ref if manifest else None) or 'the default branch'
+            source = f'clone {url} at {ref} into {cfg.src_dir}'
+        tools = _tools.required_tools(
+            cfg.os_name, manifest.tools if manifest else {}, repair=cfg.repair
+        )
+        names = ', '.join([t.label for t in tools] + list(_tools.PYTHON_BUILD_PACKAGES))
+        tools_text = (
+            f'check {names}. Anything missing is listed and installed into {sys.prefix} '
+            'only after one more confirmation'
+        )
+        if manifest is None:
+            options_text = "the default module groups and options from the checkout's manifest"
+        else:
+            try:
+                groups = resolve_groups(
+                    manifest,
+                    cfg.os_name,
+                    with_=cfg.with_,
+                    without=cfg.without,
+                    all_=cfg.all_,
+                    minimal=cfg.minimal,
+                )
+                values = resolve_options(manifest, cfg.options)
+            except ManifestError as err:
+                raise BuildError(str(err)) from None
+            options_text = f'module groups {", ".join(groups) or "(none)"}'
+            if values:
+                options_text += '. Options ' + ', '.join(f'{k}={v}' for k, v in values.items())
+        configure = f'cmake, {cfg.build_type} build with Ninja, into {cfg.cmake_dir}'
+        if cfg.defines:
+            configure += ', plus ' + ' '.join(f'-D{d}' for d in cfg.defines)
+        cache = {'none': 'off', 'auto': 'ccache or sccache, whichever is on PATH'}
+        configure += f'. Compiler cache: {cache.get(cfg.compiler_cache, cfg.compiler_cache)}'
+        jobs = cfg.jobs or os.cpu_count() or 1
+        build = f'compile with {jobs} parallel jobs, logging to {cfg.build_dir / "build.log"}'
+        wheel = f'package the wheel with setup.py bdist_wheel into {cfg.dist_dir}'
+        if cfg.repair:
+            repairer = _tools.required_tools(cfg.os_name, {}, repair=True)[-1].name
+            repair = (
+                f'bundle the libraries the wheel links against with {repairer}, '
+                f'into {cfg.wheelhouse}, so it installs on other machines. '
+                '--no-repair skips it'
+            )
+        else:
+            repair = 'skipped (--no-repair), so the wheel may only work on this machine'
+        if cfg.install:
+            install = f'install the wheel into {sys.prefix}'
+        else:
+            install = 'skipped. The install command is printed at the end, or pass --install'
+        return [
+            ('Source', source),
+            ('Tools', tools_text),
+            ('Build options', options_text),
+            ('Configure', configure),
+            ('Build', build),
+            ('Wheel', wheel),
+            ('Repair', repair),
+            ('Install', install),
+        ]
+
+    def confirm_start(self) -> None:
+        """Say where the build goes and ask before the first step; ``--yes`` answers yes."""
+        cfg = self.config
+        self.say(
+            f'Source, build tree and wheel go in [bold]{escape(str(cfg.build_dir))}[/bold]. '
+            'Compiling takes from minutes to over an hour and needs several GB of disk.'
+        )
+        if (cfg.yes or cfg.dry_run) and not cfg.prompting:
+            self.confirm('Proceed? (n stops)')
+            return
+        if not sys.stdin.isatty():
+            msg = 'Pass --yes to build without a terminal.'
+            raise BuildError(msg)
+        if not Confirm.ask('Proceed? (n stops)', default=True, console=self.console):
+            msg = 'Stopped before the first step.'
             raise BuildError(msg)
 
     def run(
@@ -412,19 +543,22 @@ class Builder:
         )
         if self.config.manylinux:
             return self.build_in_manylinux()
-        self.say(
-            'Eight steps: source, tools, build options, configure, build, wheel, repair, '
-            'and install.'
-        )
+        if self.config.interactive:
+            self.say(
+                'Eight steps: source, tools, build options, configure, build, wheel, repair, '
+                'and install.'
+            )
+        else:
+            self.say('The build runs these eight steps:')
+            for number, (name, text) in enumerate(self.plan(), start=1):
+                self.say(f'  {number}. [bold]{name}[/bold]: {escape(text)}')
         if self.config.prompting:
             self.say(
                 'Each step explains what it will do and asks before running any command. Enter '
                 'takes the default shown in parentheses, and each question says what n and any '
                 'other answer do. Ctrl-C stops at any time.'
             )
-        if not self.confirm('Proceed? (n stops)'):
-            msg = 'Stopped before the first step.'
-            raise BuildError(msg)
+        self.confirm_start()
         self.phase_source()
         self.phase_tools()
         self.phase_groups()
@@ -659,7 +793,7 @@ class Builder:
         """Check every tool, then install what is missing after one confirmation."""
         cfg = self.config
         self.step('2/8 Tools')
-        tools = _tools.required_tools(cfg.os_name, self.manifest.tools, repair=cfg.repairs)
+        tools = _tools.required_tools(cfg.os_name, self.manifest.tools, repair=cfg.repair)
         self._activate_msvc(tools)
         table = Table(show_header=True, header_style='bold purple')
         table.add_column('Tool')
@@ -1376,8 +1510,8 @@ class Builder:
         """Bundle the shared libraries into the wheel."""
         cfg = self.config
         self.step('7/8 Repair')
-        if not cfg.repairs:
-            self.say('Skipped. --repair bundles the system libraries the wheel links against.')
+        if not cfg.repair:
+            self.say('Skipped (--no-repair).')
             return
         self.say(
             'Repairing bundles the libraries the wheel links against from outside it, '
@@ -1391,7 +1525,7 @@ class Builder:
         if not self.confirm('Repair the wheel? (n skips it)'):
             self.say('Skipped.')
             return
-        wheel = self.wheel or cfg.dist_dir / '<backend>-*.whl'
+        wheel = self.wheel or cfg.dist_dir / f'{cfg.backend}-*.whl'
         cmd, env = self.repair_command(wheel)
         self.run(cmd, env=env)
         if not cfg.dry_run:
@@ -1417,7 +1551,9 @@ class Builder:
         """Install the wheel into the current environment when asked."""
         cfg = self.config
         self.step('8/8 Install')
-        wheel = self.wheel or cfg.wheelhouse / '<backend>-*.whl'
+        wheel = self.wheel or (cfg.wheelhouse if cfg.repair else cfg.dist_dir) / (
+            f'{cfg.backend}-*.whl'
+        )
         cmd = self.install_command(wheel)
         if cmd is None:
             self.say(f'No pip or uv found; install the wheel yourself: {wheel}')
@@ -1460,6 +1596,7 @@ class Builder:
             if probe.returncode != 0:
                 msg = 'Docker is installed but its daemon is not running or not reachable.'
                 raise BuildError(msg)
+        self.confirm_start()
         self.phase_source()
         install_here = cfg.install and cfg.os_name == 'linux'
         if install_here and _tools.pip_install_command() is None:
@@ -1493,7 +1630,7 @@ class Builder:
                     folder.mkdir(parents=True, exist_ok=True)
         self.run(cmd)
         if not cfg.dry_run:
-            self.wheel = self._newest_wheel(cfg.wheelhouse if cfg.repairs else cfg.dist_dir)
+            self.wheel = self._newest_wheel(cfg.wheelhouse if cfg.repair else cfg.dist_dir)
         if cfg.os_name == 'linux':
             self.phase_install()
         else:
@@ -1529,7 +1666,7 @@ class Builder:
             'clean': cfg.clean,
             'reconfigure': cfg.reconfigure,
             'version_suffix': cfg.version_suffix,
-            'repair': cfg.repairs,
+            'repair': cfg.repair,
             'install': False,
             'yes': True,
             'interactive': cfg.prompting,

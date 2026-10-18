@@ -35,8 +35,8 @@ fork (see :ref:`vtk_backend_install`), or your own fork of VTK:
     pyvista build cvista
     pyvista build vtk --url https://github.com/me/vtk.git --ref my-branch
 
-Install whatever the build is missing without being asked, for scripts and CI.
-The list of what gets installed is still printed:
+Build without being asked, for scripts and CI. The list of what gets
+installed is still printed:
 
 .. code-block:: bash
 

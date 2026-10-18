@@ -268,9 +268,16 @@ def _config(tmp_path: Path, **kwargs) -> BuildConfig:
 @pytest.fixture(autouse=True)
 def _no_compiler_cache_env(monkeypatch: pytest.MonkeyPatch):
     """Keep the developer's compiler cache settings out of every test."""
-    for name in list(os.environ):
-        if name.startswith(('CCACHE_', 'SCCACHE_')):
-            monkeypatch.delenv(name)
+    for name in (
+        'CCACHE_BASEDIR',
+        'CCACHE_COMPILERCHECK',
+        'CCACHE_CONFIGPATH',
+        'CCACHE_DIR',
+        'CCACHE_LOGFILE',
+        'CCACHE_NOHASHDIR',
+        'SCCACHE_DIR',
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture
@@ -286,7 +293,12 @@ def no_tools(mocker: MockerFixture):
 def test_dry_run_commands(tmp_path: Path, os_name):
     console = Console(record=True, width=4000, force_terminal=False)
     cfg = _config(
-        tmp_path, os_name=os_name, defines=['FOO=1'], ref='v9.7.0', compiler_cache='auto'
+        tmp_path,
+        os_name=os_name,
+        defines=['FOO=1'],
+        ref='v9.7.0',
+        compiler_cache='auto',
+        repair=True,
     )
     builder = Builder(cfg, console)
     assert builder.build() is None
@@ -298,27 +310,17 @@ def test_dry_run_commands(tmp_path: Path, os_name):
     assert '-DVTK_VERSION_SUFFIX= ' in out
     configure = next(line for line in out.splitlines() if ' -GNinja' in line)
     assert ('_PYTHON_HOST_PLATFORM=macosx-11.0-' in configure) == (os_name == 'macos')
-    assert ('delvewheel repair' in out) == (os_name == 'windows')
-    assert ('Skipped. --repair' in out) == (os_name != 'windows')
+    repairer = {
+        'linux': 'auditwheel repair',
+        'macos': 'delocate-wheel',
+        'windows': 'delvewheel repair',
+    }
+    assert repairer[os_name] in out
     assert 'setup.py bdist_wheel' in out
     assert '--force-reinstall' in out  # printed as the install hint
     launcher = 'sccache' if os_name == 'windows' else 'ccache'
     assert f'-DCMAKE_CXX_COMPILER_LAUNCHER={launcher}' in out
     assert f'$ {launcher} --show-stats' in out
-
-
-@pytest.mark.parametrize(
-    ('os_name', 'repair', 'expected'),
-    [
-        ('linux', None, False),
-        ('macos', None, False),
-        ('windows', None, True),
-        ('linux', True, True),
-        ('windows', False, False),
-    ],
-)
-def test_repair_default(tmp_path: Path, os_name, repair, expected):
-    assert _config(tmp_path, os_name=os_name, repair=repair).repairs is expected
 
 
 @pytest.mark.usefixtures('no_tools')
@@ -327,12 +329,12 @@ def test_dry_run_flags(tmp_path: Path):
     cfg = _config(
         tmp_path,
         minimal=True,
-        repair=False,
         build_type='Debug',
         jobs=3,
         ref='main',
         version_suffix='',
         options=['smp=TBB'],
+        repair=False,
     )
     Builder(cfg, console).build()
     out = console.export_text()
@@ -343,7 +345,7 @@ def test_dry_run_flags(tmp_path: Path):
     assert '-DVTK_GROUP_ENABLE_Rendering=NO' in out
     assert '-DVTK_SMP_IMPLEMENTATION_TYPE=TBB' in out
     assert '-DVTK_VERSION_SUFFIX= ' in out
-    assert 'Skipped. --repair' in out
+    assert 'Skipped (--no-repair).' in out
 
 
 @pytest.mark.usefixtures('no_tools')
@@ -1066,10 +1068,32 @@ def test_intro_explains_and_asks(tmp_path: Path, mocker: MockerFixture):
     assert (
         'asks before running any command. Enter takes the default shown' in console.export_text()
     )
-    builder = Builder(_config(tmp_path, dry_run=False), Console(quiet=True))
-    mocker.patch.object(builder, 'confirm', return_value=False)
-    with pytest.raises(BuildError, match='Stopped before the first step'):
+
+
+@pytest.mark.parametrize(
+    ('kwargs', 'tty', 'answer', 'error'),
+    [
+        ({'yes': True}, False, None, None),
+        ({'dry_run': True}, False, None, None),
+        ({}, False, None, 'Pass --yes'),
+        ({'interactive': True}, False, None, 'Pass --yes'),
+        ({}, True, True, None),
+        ({}, True, False, 'Stopped before the first step'),
+        ({'yes': True, 'interactive': True}, True, False, 'Stopped before the first step'),
+    ],
+)
+def test_confirm_start(tmp_path: Path, mocker: MockerFixture, kwargs, tty, answer, error):
+    """Every run asks once before the first step unless ``--yes`` or ``--dry-run`` is given."""
+    mocker.patch.object(phases.sys.stdin, 'isatty', return_value=tty)
+    ask = mocker.patch.object(phases.Confirm, 'ask', return_value=answer)
+    console = Console(record=True, width=4000, force_terminal=False)
+    builder = Builder(_config(tmp_path, **{'dry_run': False, **kwargs}), console)
+    source = mocker.patch.object(builder, 'phase_source', side_effect=RuntimeError('started'))
+    with pytest.raises(BuildError if error else RuntimeError, match=error or 'started'):
         builder.build()
+    assert ask.call_count == (answer is not None)
+    assert source.called == (error is None)
+    assert f'go in {tmp_path / "vtk-build"}' in console.export_text()
 
 
 def test_confirm_asks_on_a_terminal(tmp_path: Path, mocker: MockerFixture):
@@ -1393,7 +1417,7 @@ def test_build_in_manylinux(tmp_path: Path, mocker: MockerFixture):
     assert f'  • the vtk wheel into {sys.prefix}, once it is built' in out
     assert 'Done' in out
 
-    cfg = _config(tmp_path, dry_run=False, manylinux='img', source=src, os_name='macos')
+    cfg = _config(tmp_path, dry_run=False, yes=True, manylinux='img', source=src, os_name='macos')
     builder = Builder(cfg, Console(record=True, width=4000, force_terminal=False))
     run = mocker.patch.object(builder, 'run')
     install = mocker.patch.object(builder, 'phase_install')
@@ -1406,7 +1430,7 @@ def test_build_in_manylinux(tmp_path: Path, mocker: MockerFixture):
     with pytest.raises(BuildError, match='builds use ccache'):
         builder.build()
     builder = Builder(
-        _config(tmp_path, dry_run=False, manylinux='img', source=src, install=True),
+        _config(tmp_path, dry_run=False, yes=True, manylinux='img', source=src, install=True),
         Console(quiet=True),
     )
     mocker.patch.object(tools, 'pip_install_command', return_value=None)
@@ -1434,8 +1458,14 @@ def test_build_in_manylinux_dry_run(tmp_path: Path, mocker: MockerFixture):
     out = console.export_text()
     assert 'Run the build in the container? (n stops) -> yes (dry run)' in out
     assert not (tmp_path / 'vtk-build').exists()
-    builder = Builder(_config(tmp_path, dry_run=False, manylinux='img'), Console(quiet=True))
     mocker.patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 0))
+    builder = Builder(_config(tmp_path, dry_run=False, manylinux='img'), Console(quiet=True))
+    mocker.patch.object(builder, 'phase_source', side_effect=AssertionError)
+    with pytest.raises(BuildError, match='Pass --yes'):
+        builder.build()
+    builder = Builder(
+        _config(tmp_path, dry_run=False, yes=True, manylinux='img'), Console(quiet=True)
+    )
     run = mocker.patch.object(builder, 'run')
     mocker.patch.object(builder, 'confirm', side_effect=lambda q, **_: 'container' not in q)
     with pytest.raises(BuildError, match='Stopped before the container build'):
@@ -1487,22 +1517,18 @@ def test_windows_declined_msvc(tmp_path: Path, mocker: MockerFixture):
     assert not activated.called
 
 
-def test_manylinux_repairs_by_default(tmp_path: Path):
-    assert _config(tmp_path, manylinux='img').repairs
-    assert not _config(tmp_path, manylinux='img', repair=False).repairs
-
-
 def test_build_in_manylinux_forwarded_args(tmp_path: Path, mocker: MockerFixture):
     mocker.patch.object(tools.shutil, 'which', side_effect=lambda name, **_: f'/usr/bin/{name}')
     mocker.patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 0))
     cfg = _config(
         tmp_path,
         dry_run=False,
+        yes=True,
         manylinux='img',
         url='https://x/vtk.git',
         ref='v1',
         all_=True,
-        compiler_cache='none',
+        repair=True,
     )
     builder = Builder(cfg, Console(quiet=True))
     run = mocker.patch.object(builder, 'run')
@@ -1575,3 +1601,76 @@ def test_cache_dir_precedence(tmp_path: Path, mocker: MockerFixture, monkeypatch
     mocker.patch.object(builder, 'hooks')
     builder.phase_build()
     assert run.call_args.args[0] == [choice, '--show-stats']
+
+
+def test_plan(tmp_path: Path):
+    """The start summary says what every step does with the given settings."""
+    cfg = _config(
+        tmp_path,
+        repair=True,
+        install=True,
+        jobs=3,
+        defines=['X=1'],
+        without=['web'],
+        ref='v9.7.0',
+    )
+    plan = dict(Builder(cfg, Console(quiet=True)).plan())
+    assert list(plan) == [
+        'Source',
+        'Tools',
+        'Build options',
+        'Configure',
+        'Build',
+        'Wheel',
+        'Repair',
+        'Install',
+    ]
+    assert (
+        plan['Source']
+        == f'clone https://gitlab.kitware.com/vtk/vtk.git at v9.7.0 into {cfg.src_dir}'
+    )
+    assert 'auditwheel' in plan['Tools']
+    assert 'auditwheel' in plan['Repair']
+    assert 'rendering' in plan['Build options']
+    assert 'web' not in plan['Build options']
+    assert plan['Configure'].endswith(', plus -DX=1. Compiler cache: off')
+    assert plan['Build'].startswith('compile with 3 parallel jobs')
+    assert plan['Install'] == f'install the wheel into {sys.prefix}'
+    with pytest.raises(BuildError, match='nope'):
+        Builder(_config(tmp_path, with_=['nope']), Console(quiet=True)).plan()
+
+    (cfg.src_dir / '.git').mkdir(parents=True)
+    (cfg.src_dir / 'pyvista-build.toml').write_text('manifest_version = 99\n')
+    plan = dict(
+        Builder(
+            _config(tmp_path, backend='demo', ref='main', repair=False), Console(quiet=True)
+        ).plan()
+    )
+    assert plan['Source'] == (
+        f'reuse the checkout at {cfg.src_dir}, local edits kept, checked out at main'
+    )
+    assert "checkout's manifest" in plan['Build options']
+    assert plan['Repair'].startswith('skipped (--no-repair)')
+    assert plan['Install'].startswith('skipped')
+    for choice, text in [('auto', 'ccache or sccache'), ('sccache', 'sccache')]:
+        plan = dict(Builder(_config(tmp_path, compiler_cache=choice), Console(quiet=True)).plan())
+        assert plan['Configure'].endswith(
+            f'Compiler cache: {text}' + ('' if choice == 'sccache' else ', whichever is on PATH')
+        )
+
+
+def test_narration_highlighter():
+    """URLs, paths, flags and versions get a style, other words do not."""
+    text = phases.Text(
+        'clone https://x.org/vtk.git at v9.7.1 into /a/b, --repair skipped, 15 jobs'
+    )
+    phases._HIGHLIGHT.highlight(text)
+    styled = {text.plain[s.start : s.end]: str(s.style) for s in text.spans}
+    assert styled.pop('/a/b') == 'magenta link file:///a/b'
+    assert styled == {
+        'https://x.org/vtk.git': 'underline blue',
+        '--repair': 'bold cyan',
+        'skipped': 'yellow',
+        'v9.7.1': 'cyan',
+        '15': 'cyan',
+    }

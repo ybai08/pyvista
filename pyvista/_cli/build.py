@@ -128,12 +128,12 @@ def _build(
         ),
     ] = None,
     repair: Annotated[
-        bool | None,
+        bool,
         Parameter(
-            help='Bundle the libraries the wheel links against. '
-            'Defaults to on for Windows and ``--manylinux``.'
+            help='Bundle the libraries the wheel links against and tag it for other machines. '
+            '``--no-repair`` skips it.'
         ),
-    ] = None,
+    ] = True,
     install: Annotated[
         bool, Parameter(help='Install the built wheel into this environment.')
     ] = False,
@@ -142,7 +142,7 @@ def _build(
         Parameter(
             name=['--yes', '-y'],
             negative='',
-            help='Install what the build needs without asking; the list is still printed.',
+            help='Start, and install what the build needs, without asking.',
         ),
     ] = False,
     manylinux: Annotated[
@@ -170,8 +170,8 @@ def _build(
 ) -> None:
     """Build a VTK backend wheel from source.
 
-    Builds with the defaults and prints every command as it runs. Anything the build has to
-    install is listed first and confirmed once; ``--yes`` skips that question.
+    Asks once before starting, then builds with the defaults and prints every command as it
+    runs. Anything the build has to install is listed and confirmed too; ``--yes`` answers both.
     ``--interactive`` walks through the steps, showing each setting and asking before running
     anything, and ``--dry-run`` prints the commands without running them. ``--manylinux``
     runs the build inside a manylinux container so the Linux wheel installs on any machine.
