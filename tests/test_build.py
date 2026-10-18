@@ -420,8 +420,13 @@ def test_too_old_tool(tmp_path: Path, mocker: MockerFixture):
 @pytest.mark.usefixtures('no_tools')
 def test_explicit_cache_missing(tmp_path: Path, mocker: MockerFixture):
     mocker.patch.object(tools, 'compiler_cache_tool', return_value=None)
-    with pytest.raises(BuildError, match='sccache was not found'):
+    install = mocker.patch.object(tools, 'pip_install_command')
+    with pytest.raises(BuildError, match='sccache: pip install sccache'):
         Builder(_config(tmp_path, compiler_cache='sccache'), Console(quiet=True)).build()
+    assert not install.called
+    builder = Builder(_config(tmp_path, compiler_cache='ccache'), Console(quiet=True))
+    with pytest.raises(BuildError, match='ccache was not found on PATH'):
+        builder._activate_compiler_cache()
 
 
 @pytest.mark.usefixtures('no_tools')
@@ -1000,9 +1005,16 @@ def test_tool_helpers(mocker: MockerFixture):
         return_value=subprocess.CompletedProcess([], 0, stdout='no digits'),
     )
     assert tools.executable_version('x') is None
-    for os_name in OS_NAMES:
-        assert tools.compiler_cache_instructions(os_name)
-        assert tools.compiler_instructions(os_name)
+    hints = {
+        (os_name, name): tools.compiler_cache_instructions(os_name, name)
+        for os_name in OS_NAMES
+        for name in ('auto', 'ccache', 'sccache')
+    }
+    assert all('sccache' in hints[os_name, 'sccache'] for os_name in OS_NAMES)
+    assert hints['windows', 'ccache'] == 'choco install ccache'
+    assert hints['macos', 'auto'] == 'brew install ccache'
+    assert 'sccache' in hints['windows', 'auto']
+    assert all(tools.compiler_instructions(os_name) for os_name in OS_NAMES)
     tool = tools.Tool('t', ('t',), spec='>=1')
     mocker.patch.object(tools.shutil, 'which', return_value='/usr/bin/t')
     mocker.patch.object(tools, 'executable_version', return_value=None)
@@ -1297,7 +1309,10 @@ def test_manylinux_helpers(tmp_path: Path, mocker: MockerFixture):
         paths=['/work', '/cache'],
     )
     lines = script.splitlines()
-    assert lines[:2] == ['set -euo pipefail', "trap 'chown -R 1000:1000 /work /cache' EXIT"]
+    assert lines[:2] == [
+        'set -euo pipefail',
+        "trap 'chown -R 1000:1000 /work /cache || true' EXIT",
+    ]
     assert 'dnf install -y --setopt=install_weak_deps=False a-devel b' in script
     assert "git config --global --add safe.directory '*'" in script
     assert 'yum install -y a-devel b' in script
@@ -1343,6 +1358,7 @@ def test_manylinux_helpers(tmp_path: Path, mocker: MockerFixture):
 
 
 def test_build_in_manylinux(tmp_path: Path, mocker: MockerFixture):
+    mocker.patch.object(phases.time, 'time', return_value=0.0)
     mocker.patch.object(tools.shutil, 'which', side_effect=lambda name, **_: f'/usr/bin/{name}')
     mocker.patch.object(manylinux, 'pyvista_package', return_value=tmp_path / 'pv')
     mocker.patch.object(manylinux, 'pyvista_requirements', return_value=['numpy'])
@@ -1386,7 +1402,7 @@ def test_build_in_manylinux(tmp_path: Path, mocker: MockerFixture):
     assert cmd[cmd.index('bash') - 1] == 'img'
     script = cmd[-1]
     assert 'libX11-devel' in script
-    assert "trap 'chown -R 7:7 /work /src /cache' EXIT" in script
+    assert "trap 'chown -R 7:7 /work /src /cache || true' EXIT" in script
     config = builder.container_config()
     assert shlex.quote(json.dumps(config)) in script
     assert config == {
@@ -1408,6 +1424,7 @@ def test_build_in_manylinux(tmp_path: Path, mocker: MockerFixture):
         'install': False,
         'yes': True,
         'interactive': False,
+        'in_container': True,
         'os_name': 'linux',
         'compiler_cache': 'auto',
         'cache_dir': '/cache',
@@ -1518,6 +1535,7 @@ def test_windows_declined_msvc(tmp_path: Path, mocker: MockerFixture):
 
 
 def test_build_in_manylinux_forwarded_args(tmp_path: Path, mocker: MockerFixture):
+    mocker.patch.object(phases.time, 'time', return_value=0.0)
     mocker.patch.object(tools.shutil, 'which', side_effect=lambda name, **_: f'/usr/bin/{name}')
     mocker.patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 0))
     cfg = _config(
@@ -1767,3 +1785,55 @@ def test_narration_escapes_paths(tmp_path: Path):
     cfg = _config(tmp_path, build_dir=tmp_path / 'b[x]')
     Builder(cfg, console).summary()
     assert 'b[x]' in console.export_text()
+
+
+def test_container_build_leaves_start_and_install_to_the_host(
+    tmp_path: Path, mocker: MockerFixture
+):
+    """Inside the container the build skips the start question, the install and the summary."""
+    builder = Builder(_config(tmp_path, in_container=True), Console(quiet=True))
+    calls = {
+        name: mocker.patch.object(builder, name)
+        for name in (
+            'confirm_start',
+            'phase_source',
+            'phase_tools',
+            'phase_groups',
+            'phase_configure',
+            'phase_build',
+            'phase_wheel',
+            'phase_repair',
+            'phase_install',
+            'summary',
+        )
+    }
+    builder.build()
+    assert not calls['confirm_start'].called
+    assert not calls['phase_install'].called
+    assert not calls['summary'].called
+    assert calls['phase_repair'].called
+    assert Builder(_config(tmp_path, manylinux='img'), Console(quiet=True)).container_config()[
+        'in_container'
+    ]
+
+
+def test_stale_wheel_is_not_taken(tmp_path: Path):
+    """A wheel older than the container run is not the build's wheel."""
+    cfg = _config(tmp_path, dry_run=False)
+    cfg.wheelhouse.mkdir(parents=True)
+    (cfg.wheelhouse / 'vtk-1-cp3-cp3-linux_x86_64.whl').write_text('')
+    builder = Builder(cfg, Console(quiet=True))
+    with pytest.raises(BuildError, match='No new wheel found'):
+        builder._newest_wheel(cfg.wheelhouse, since=10**12)
+
+
+def test_ccache_basedir_across_drives(tmp_path: Path, mocker: MockerFixture):
+    """Source and build on different drives set no ``CCACHE_BASEDIR``."""
+    mocker.patch.object(
+        tools, 'compiler_cache_tool', return_value=tools.Tool('ccache', ('ccache',))
+    )
+    mocker.patch.object(phases.os.path, 'commonpath', side_effect=ValueError)
+    builder = Builder(_config(tmp_path, compiler_cache='ccache'), Console(quiet=True))
+    builder.env.pop('CCACHE_BASEDIR', None)
+    builder._activate_compiler_cache()
+    assert 'CCACHE_BASEDIR' not in builder.env

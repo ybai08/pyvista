@@ -143,7 +143,7 @@ def container_script(
     """
     lines = ['set -euo pipefail']
     if owner is not None and paths:
-        lines.append(f"trap 'chown -R {owner} {' '.join(paths)}' EXIT")
+        lines.append(f"trap 'chown -R {owner} {' '.join(paths)} || true' EXIT")
     lines += [
         f'PY={shlex.quote(python)}',
         'if ! test -x "$PY"; then echo "$PY is not in this image" >&2; exit 1; fi',

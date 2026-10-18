@@ -13,6 +13,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from typing import TYPE_CHECKING
 
 from rich.console import Console
@@ -157,6 +158,7 @@ class BuildConfig:
     interactive: bool = False
     dry_run: bool = False
     manylinux: str | None = None
+    in_container: bool = False
     os_name: str = field(default_factory=_tools.host_os)
 
     @property
@@ -572,7 +574,8 @@ class Builder:
                 'Each step explains what it will do and asks before running any command; '
                 'Enter takes the default.'
             )
-        self.confirm_start()
+        if not self.config.in_container:
+            self.confirm_start()
         self.phase_source()
         self.phase_tools()
         self.phase_groups()
@@ -580,8 +583,9 @@ class Builder:
         self.phase_build()
         self.phase_wheel()
         self.phase_repair()
-        self.phase_install()
-        self.summary()
+        if not self.config.in_container:
+            self.phase_install()
+            self.summary()
         return self.wheel
 
     def phase_source(self) -> None:
@@ -723,6 +727,12 @@ class Builder:
                 table.add_row(f'{name} (python)', sys.prefix, '[green]ok[/green]')
         table.add_row(*self._compiler_cache_row())
         self.console.print(table)
+        choice = cfg.compiler_cache
+        if choice not in ('none', 'auto') and not _tools.compiler_cache_tool(
+            choice, cfg.os_name, self.env
+        ):
+            hint = _tools.compiler_cache_instructions(cfg.os_name, choice)
+            blocking.append(_tools.Tool(choice, (choice,), instructions=hint))
         if blocking:
             lines = [f'{t.name}: {t.instructions}' for t in blocking]
             msg = 'Install these and run again:\n  ' + '\n  '.join(lines)
@@ -761,7 +771,7 @@ class Builder:
         self.say(
             f'Visual Studio found; importing its build environment from [bold]{vcvarsall}[/bold].'
         )
-        if self.confirm('Use it?') and not self.config.dry_run:
+        if self.confirm('Use it?'):
             try:
                 self.env = _tools.msvc_environment(vcvarsall, env=self.env)
             except subprocess.CalledProcessError as err:
@@ -798,7 +808,7 @@ class Builder:
 
         """
         if self.config.cache_dir is None and self.env.get(var):
-            return Path(self.env[var])
+            return Path(self.env[var]).resolve()
         return self.config.compiler_cache_dir
 
     def _activate_compiler_cache(self) -> None:
@@ -809,7 +819,7 @@ class Builder:
             return
         self.launcher = _tools.compiler_cache_tool(cfg.compiler_cache, cfg.os_name, self.env)
         if self.launcher is None:
-            hint = _tools.compiler_cache_instructions(cfg.os_name)
+            hint = _tools.compiler_cache_instructions(cfg.os_name, cfg.compiler_cache)
             if cfg.compiler_cache != 'auto':
                 msg = f'{cfg.compiler_cache} was not found on PATH. Install it: {hint}'
                 raise BuildError(msg)
@@ -825,7 +835,10 @@ class Builder:
         if self.launcher.name == 'ccache':
             if cfg.os_name != 'windows':
                 self.env.setdefault('CCACHE_COMPILERCHECK', '%compiler% --version')
-            base = Path(os.path.commonpath([cfg.src_dir.resolve(), cfg.cmake_dir.resolve()]))
+            try:
+                base = Path(os.path.commonpath([cfg.src_dir.resolve(), cfg.cmake_dir.resolve()]))
+            except ValueError:
+                base = Path(cfg.cmake_dir.resolve().anchor)
             if base != Path(base.anchor):
                 self.env.setdefault('CCACHE_BASEDIR', str(base))
                 self.env.setdefault('CCACHE_NOHASHDIR', '1')
@@ -1134,13 +1147,15 @@ class Builder:
         self.hooks('post_wheel')
         self.wheel = self._newest_wheel(cfg.dist_dir)
 
-    def _newest_wheel(self, folder: Path) -> Path | None:
-        """Return the most recently written wheel in a folder."""
+    def _newest_wheel(self, folder: Path, *, since: float | None = None) -> Path | None:
+        """Return the most recently written wheel in a folder, optionally newer than ``since``."""
         wheels = sorted(folder.glob('*.whl'), key=lambda p: p.stat().st_mtime)
+        if since is not None:
+            wheels = [w for w in wheels if w.stat().st_mtime >= since]
         if not wheels:
             if self.config.dry_run:
                 return None
-            msg = f'No wheel found in {folder}.'
+            msg = f'No new wheel found in {folder}.' if since else f'No wheel found in {folder}.'
             raise BuildError(msg)
         return wheels[-1]
 
@@ -1297,9 +1312,11 @@ class Builder:
             for inside, folder in mounts.items():
                 if inside != package_mount:
                     folder.mkdir(parents=True, exist_ok=True)
+        started = time.time()
         self.run(cmd)
         if not cfg.dry_run:
-            self.wheel = self._newest_wheel(cfg.wheelhouse if cfg.repair else cfg.dist_dir)
+            folder = cfg.wheelhouse if cfg.repair else cfg.dist_dir
+            self.wheel = self._newest_wheel(folder, since=started)
         if cfg.os_name == 'linux':
             self.phase_install()
         else:
@@ -1339,6 +1356,7 @@ class Builder:
             'install': False,
             'yes': True,
             'interactive': cfg.prompting,
+            'in_container': True,
             'os_name': 'linux',
             'compiler_cache': cfg.compiler_cache,
             'cache_dir': _manylinux.CACHE if cache else None,
