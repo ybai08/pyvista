@@ -18,6 +18,7 @@ import sys
 from typing import TYPE_CHECKING
 
 from rich.console import Console
+from rich.highlighter import Highlighter
 from rich.markup import escape
 from rich.prompt import Confirm as _RichConfirm
 from rich.prompt import Prompt as _RichPrompt
@@ -48,6 +49,33 @@ if TYPE_CHECKING:
 STATE_FILENAME = '.pyvista-build.json'
 BUILD_TYPES = ('Release', 'RelWithDebInfo', 'Debug')
 COMPILER_CACHES = ('auto', 'ccache', 'sccache', 'none')
+
+
+class _NarrationHighlighter(Highlighter):
+    """Color URLs, paths, command-line flags and version numbers."""
+
+    rules = (
+        (re.compile(r'(https?://|git@)\S*[^\s.,)]'), 'underline blue'),
+        (re.compile(r'(?<![\w/.:])(~|/)[-\w.+~/]*[-\w+~/]'), 'magenta'),
+        (re.compile(r'(?<![\w-])--?[a-zA-Z][\w-]*'), 'bold cyan'),
+        (re.compile(r'(?<![\w.])v?\d+(\.\d+)*(?!\w)'), 'cyan'),
+        (re.compile(r'\b[Ss]kipped\b'), 'yellow'),
+    )
+
+    def highlight(self, text: Text) -> None:
+        """Apply every rule to the text in place.
+
+        Parameters
+        ----------
+        text : Text
+            Text to color.
+
+        """
+        for pattern, style in self.rules:
+            text.highlight_regex(pattern, style)
+
+
+_HIGHLIGHT = _NarrationHighlighter()
 _TAG_LIKE = re.compile(r'v?\d+\.\d+')
 _join = subprocess.list2cmdline if os.name == 'nt' else shlex.join
 _NOISY_BUILD_LINE = re.compile(
@@ -207,7 +235,7 @@ class Builder:
             Rich markup to print.
 
         """
-        self.console.print(message, highlight=False)
+        self.console.print(_HIGHLIGHT(Text.from_markup(message)))
 
     def confirm(self, question: str, *, default: bool = True) -> bool:
         """Ask a yes/no question, or take the default when not interactive.
