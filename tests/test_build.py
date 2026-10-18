@@ -1652,9 +1652,9 @@ def test_narration_highlighter():
     )
     phases._HIGHLIGHT.highlight(text)
     styled = {text.plain[s.start : s.end]: str(s.style) for s in text.spans}
+    assert styled.pop('/a/b') == 'magenta link file:///a/b'
     assert styled == {
         'https://x.org/vtk.git': 'underline blue',
-        '/a/b': 'magenta',
         '--repair': 'bold cyan',
         'skipped': 'yellow',
         'v9.7.1': 'cyan',
