@@ -54,6 +54,7 @@ class _NarrationHighlighter(Highlighter):
         (re.compile(r'(?<![\w/.:])(~|/)[-\w.+~/]*[-\w+~/]'), 'magenta'),
         (re.compile(r'(?<![\w-])--?[a-zA-Z][\w-]*'), 'bold cyan'),
         (re.compile(r'(?<![\w.])v?\d+(\.\d+)*(?!\w)'), 'cyan'),
+        (re.compile(r'\b[Ss]kipped\b'), 'yellow'),
     )
 
     def highlight(self, text: Text) -> None:

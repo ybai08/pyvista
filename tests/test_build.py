@@ -1647,13 +1647,16 @@ def test_plan(tmp_path: Path):
 
 def test_narration_highlighter():
     """URLs, paths, flags and versions get a style, other words do not."""
-    text = phases.Text('clone https://x.org/vtk.git at v9.7.1 into /a/b with --repair, 15 jobs')
+    text = phases.Text(
+        'clone https://x.org/vtk.git at v9.7.1 into /a/b, --repair skipped, 15 jobs'
+    )
     phases._HIGHLIGHT.highlight(text)
     styled = {text.plain[s.start : s.end]: str(s.style) for s in text.spans}
     assert styled == {
         'https://x.org/vtk.git': 'underline blue',
         '/a/b': 'magenta',
         '--repair': 'bold cyan',
+        'skipped': 'yellow',
         'v9.7.1': 'cyan',
         '15': 'cyan',
     }
