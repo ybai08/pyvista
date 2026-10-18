@@ -1321,9 +1321,8 @@ def test_default_jobs_follow_memory(tmp_path: Path, mocker: MockerFixture):
 def test_physical_memory(mocker: MockerFixture):
     """Physical memory comes from sysconf, or GlobalMemoryStatusEx on Windows."""
     mocker.stopall()
-    if sys.platform != 'win32':
-        assert tools.physical_memory() > 0
-    mocker.patch.object(tools.os, 'sysconf', side_effect=ValueError)
+    assert tools.physical_memory() > 0
+    mocker.patch.object(tools.os, 'sysconf', side_effect=ValueError, create=True)
     mocker.patch.object(tools.sys, 'platform', 'linux')
     assert tools.physical_memory() is None
     import ctypes
