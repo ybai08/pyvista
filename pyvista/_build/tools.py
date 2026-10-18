@@ -255,6 +255,66 @@ def required_tools(os_name: str, tool_specs: Mapping[str, str], *, repair: bool)
 
 PYTHON_BUILD_PACKAGES = ('setuptools', 'wheel')
 
+MEMORY_PER_JOB = 2 * 1024**3
+
+
+def physical_memory() -> int | None:
+    """Return the machine's physical memory in bytes, or ``None`` when it cannot be read.
+
+    Returns
+    -------
+    int | None
+        Total physical memory in bytes.
+
+    """
+    if sys.platform == 'win32':
+        import ctypes  # noqa: PLC0415
+
+        class _MemoryStatus(ctypes.Structure):
+            _fields_ = [
+                ('dwLength', ctypes.c_ulong),
+                ('dwMemoryLoad', ctypes.c_ulong),
+                ('ullTotalPhys', ctypes.c_ulonglong),
+                ('ullAvailPhys', ctypes.c_ulonglong),
+                ('ullTotalPageFile', ctypes.c_ulonglong),
+                ('ullAvailPageFile', ctypes.c_ulonglong),
+                ('ullTotalVirtual', ctypes.c_ulonglong),
+                ('ullAvailVirtual', ctypes.c_ulonglong),
+                ('ullAvailExtendedVirtual', ctypes.c_ulonglong),
+            ]
+
+        status = _MemoryStatus()
+        status.dwLength = ctypes.sizeof(status)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return None
+        return int(status.ullTotalPhys)
+    try:
+        return os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def default_jobs(cores: int, memory: int | None) -> int:
+    """Return the parallel compile jobs: one per core, at most one per 2 GB of memory.
+
+    Parameters
+    ----------
+    cores : int
+        CPU cores.
+
+    memory : int | None
+        Physical memory in bytes, or ``None`` when unknown.
+
+    Returns
+    -------
+    int
+        Job count, at least 1.
+
+    """
+    if memory is None:
+        return max(1, cores)
+    return max(1, min(cores, memory // MEMORY_PER_JOB))
+
 
 def python_build_packages() -> list[str]:
     """Return the packages ``setup.py bdist_wheel`` needs that are not importable.
