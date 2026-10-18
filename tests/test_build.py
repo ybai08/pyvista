@@ -933,10 +933,32 @@ def test_intro_explains_and_asks(tmp_path: Path, mocker: MockerFixture):
     with pytest.raises(BuildError, match='Stopped before the first step'):
         builder.build()
     assert 'asks before running any command; Enter takes the default' in console.export_text()
-    builder = Builder(_config(tmp_path, dry_run=False), Console(quiet=True))
-    mocker.patch.object(builder, 'confirm', return_value=False)
-    with pytest.raises(BuildError, match='Stopped before the first step'):
+
+
+@pytest.mark.parametrize(
+    ('kwargs', 'tty', 'answer', 'error'),
+    [
+        ({'yes': True}, False, None, None),
+        ({'dry_run': True}, False, None, None),
+        ({}, False, None, 'Pass --yes'),
+        ({'interactive': True}, False, None, 'Pass --yes'),
+        ({}, True, True, None),
+        ({}, True, False, 'Stopped before the first step'),
+        ({'yes': True, 'interactive': True}, True, False, 'Stopped before the first step'),
+    ],
+)
+def test_confirm_start(tmp_path: Path, mocker: MockerFixture, kwargs, tty, answer, error):
+    """Every run asks once before the first step unless ``--yes`` or ``--dry-run`` is given."""
+    mocker.patch.object(phases.sys.stdin, 'isatty', return_value=tty)
+    ask = mocker.patch.object(phases.Confirm, 'ask', return_value=answer)
+    console = Console(record=True, width=4000, force_terminal=False)
+    builder = Builder(_config(tmp_path, **{'dry_run': False, **kwargs}), console)
+    source = mocker.patch.object(builder, 'phase_source', side_effect=RuntimeError('started'))
+    with pytest.raises(BuildError if error else RuntimeError, match=error or 'started'):
         builder.build()
+    assert ask.call_count == (answer is not None)
+    assert source.called == (error is None)
+    assert f'go in {tmp_path / "vtk-build"}' in console.export_text()
 
 
 def test_confirm_asks_on_a_terminal(tmp_path: Path, mocker: MockerFixture):
