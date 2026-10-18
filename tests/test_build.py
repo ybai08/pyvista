@@ -1477,6 +1477,15 @@ def test_build_in_manylinux_dry_run(tmp_path: Path, mocker: MockerFixture):
     out = console.export_text()
     assert 'Run the build in the container? (n stops) -> yes (dry run)' in out
     assert not (tmp_path / 'vtk-build').exists()
+    which = mocker.patch.object(
+        tools.shutil, 'which', side_effect=lambda name, **_: None if name == 'docker' else name
+    )
+    console = Console(record=True, width=4000, force_terminal=False)
+    builder = Builder(_config(tmp_path, manylinux='img'), console)
+    mocker.patch.object(builder, 'run')
+    assert builder.build() is None
+    assert 'docker was not found on PATH' in console.export_text()
+    which.side_effect = lambda name, **_: f'/usr/bin/{name}'
     mocker.patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 0))
     builder = Builder(_config(tmp_path, dry_run=False, manylinux='img'), Console(quiet=True))
     mocker.patch.object(builder, 'phase_source', side_effect=AssertionError)
@@ -1653,8 +1662,9 @@ def test_plan(tmp_path: Path):
     assert 'auditwheel' in plan['Repair']
     assert 'rendering' in plan['Build options']
     assert 'web' not in plan['Build options']
-    assert plan['Configure'].endswith(', plus -DX=1. Compiler cache: off')
-    assert plan['Build'].startswith('compile with 3 parallel jobs')
+    assert plan['Configure'].endswith(', plus -DX=1. Compiler cache (--compiler-cache): off')
+    assert plan['Build'].startswith('compile with 3 parallel jobs (--jobs)')
+    assert plan['Build options'].endswith('--opt NAME=VALUE change them')
     assert plan['Install'] == f'install the wheel into {sys.prefix}'
     with pytest.raises(BuildError, match='nope'):
         Builder(_config(tmp_path, with_=['nope']), Console(quiet=True)).plan()
@@ -1675,8 +1685,14 @@ def test_plan(tmp_path: Path):
     for choice, text in [('auto', 'ccache or sccache'), ('sccache', 'sccache')]:
         plan = dict(Builder(_config(tmp_path, compiler_cache=choice), Console(quiet=True)).plan())
         assert plan['Configure'].endswith(
-            f'Compiler cache: {text}' + ('' if choice == 'sccache' else ', whichever is on PATH')
+            f'Compiler cache (--compiler-cache): {text}'
+            + ('' if choice == 'sccache' else ', whichever is on PATH')
         )
+    plan = dict(Builder(_config(tmp_path, clean=True, update=True), Console(quiet=True)).plan())
+    assert plan['Configure'].startswith(f'delete {cfg.cmake_dir} (--clean), then cmake')
+    assert plan['Source'].endswith('--update fetches, then checks out the release tag')
+    plan = dict(Builder(_config(tmp_path, source=tmp_path), Console(quiet=True)).plan())
+    assert plan['Source'] == f'build the checkout at {tmp_path}, local edits kept'
 
 
 def test_narration_highlighter_edge_cases(mocker: MockerFixture):

@@ -18,8 +18,10 @@ PyVista ships a command that does this for you:
 .. versionadded:: 0.50
 
 It works on Linux, macOS, and Windows and follows the official `Building
-VTK <https://docs.vtk.org/en/latest/build_instructions/index.html>`_
-instructions, with the options PyVista's own CI uses. By default it
+Python wheels
+<https://docs.vtk.org/en/latest/advanced/build_python_wheels.html>`_
+instructions, with the options PyVista's own CI uses. The wheel is built
+for the Python that runs the command. By default it
 says where the build goes and asks once before starting, then builds
 with those defaults straight through, printing every command as it
 runs. Anything it has to install is listed and confirmed too, and
@@ -37,18 +39,19 @@ command line takes to change one in place.
 The command reference with more examples is at :ref:`cli_build`. The
 result is a wheel, so the build selects itself through the usual
 mechanism once installed: see :envvar:`PYVISTA_VTK_BACKEND` and
-:ref:`the backend section of the installation guide <vtk_backend_install>`.
+:ref:`the backend section of the installation guide <vtk_backend>`.
 
 The Steps
 ~~~~~~~~~
 1. **Source.** VTK is cloned into ``./vtk-build/src`` at the release tag
-   PyVista supports. Use ``--ref`` for another tag, branch or commit, and
-   ``--build-dir`` to put everything somewhere else. An existing checkout
-   is reused as is, local edits included.
-2. **Tools.** ``git``, ``cmake``, ``ninja``, a C++ compiler and the
+   PyVista supports. Use ``--ref`` for another tag, branch, or commit,
+   ``--build-dir`` to put everything somewhere else, and ``--source DIR``
+   to build a checkout you already have. An existing checkout is reused
+   as is, local edits included.
+2. **Tools.** ``git``, ``cmake``, ``ninja``, a C++ compiler, and the
    wheel repair tool are checked (see :ref:`build_tooling`
    for what each one does). Everything the build would install is then
-   listed, each item with where it goes: ``cmake``, ``ninja`` and the
+   listed, each item with where it goes: ``cmake``, ``ninja``, and the
    repair tool when missing or too old, ``setuptools`` and ``wheel``, and
    the finished wheel with ``--install``. One confirmation covers the
    whole list, and ``--yes`` answers it in advance. Without a terminal
@@ -57,22 +60,37 @@ The Steps
    On Windows, Visual Studio's build environment is imported
    automatically. ``--compiler-cache auto`` adds a compiler cache
    (``ccache`` or ``sccache``) when one is on ``PATH``.
-3. **Build options.** The modules to build are organized into named
-   groups (``rendering``, ``io``, ``web``, ``headless-egl`` and more), each
-   with a one-line description. The default set matches the stock wheel
-   plus what PyVista's CI enables. At the prompt, ``n`` asks about each
-   group in turn, and the command-line flags work there as well:
+3. **Build options.** On top of the modules every build has, the
+   modules to build are organized into named groups. The default set
+   matches the stock wheel plus what PyVista's CI enables:
+
+   - ``rendering``: OpenGL rendering, widgets, charts, and text
+   - ``io``: extra readers and writers (scene import, Exodus, Xdmf2)
+   - ``web``: web export modules used by trame and the Jupyter backends
+   - ``matplotlib``: Matplotlib-rendered math text and labels
+   - ``parallel``: DIY2-based parallel filters
+   - ``serialization``: object serialization and ``.pyi`` stub files
+   - ``headless-egl`` and ``headless-osmesa`` (Linux, off by default):
+     off-screen rendering, see :ref:`gpu_off_screen`
+
+   ``--opt smp=VALUE`` picks the threading backend for SMP-enabled
+   filters: ``Sequential`` (the default, as in the PyPI wheels),
+   ``STDThread``, ``OpenMP``, or ``TBB``, which needs TBB installed.
+   ``--all`` enables every group available on your system, leaving out
+   off-by-default groups that conflict with an enabled one. At the
+   prompt, ``n`` asks about each group in turn, and the command-line
+   flags work there as well:
 
    .. code-block:: bash
 
        pyvista build vtk --without web,matplotlib
        pyvista build vtk --minimal --with rendering
        pyvista build vtk --all
-       pyvista build vtk --opt smp=TBB
+       pyvista build vtk --opt smp=STDThread
 
-4. **Configure** shows the build type, compiler cache, version suffix
+4. **Configure** shows the build type, compiler cache, version suffix,
    and extra CMake cache entries. ``n`` asks about each in turn, and
-   ``--build-type``, ``--compiler-cache``, ``--version-suffix`` and
+   ``--build-type``, ``--compiler-cache``, ``--version-suffix``, and
    ``-D`` change one directly. Then ``cmake`` runs. Every command is
    printed in full before it runs.
 5. **Build** runs ``ninja`` and logs the full output to ``build.log``.
@@ -122,16 +140,17 @@ Other Backends
 The same command builds any VTK backend whose source tree carries a
 ``pyvista-build.toml`` manifest. That file declares the groups and
 options the backend offers, its tool requirements, per-platform CMake
-init caches and the extra commands it needs; stock VTK's manifest ships
+init caches, and the extra commands it needs; stock VTK's manifest ships
 with PyVista. `cvista <https://github.com/pyvista/cvista>`_, the
-community fork described in :ref:`vtk_backend_install`, is known by
+community fork described in :ref:`vtk_backend`, is known by
 name. A fork of VTK is built as ``vtk`` from its URL, using the manifest
-in its tree when it has one and PyVista's otherwise:
+in its tree when it has one and PyVista's otherwise. ``--url`` only
+applies when cloning, so give a fork its own ``--build-dir``:
 
 .. code-block:: bash
 
     pyvista build cvista
-    pyvista build vtk --url https://github.com/me/vtk.git --ref my-branch
+    pyvista build vtk --url https://github.com/me/vtk.git --ref my-branch --build-dir vtk-fork-build
 
 A backend built this way is selected like any other installed one:
 automatically for ``cvista``, or explicitly through
@@ -183,8 +202,9 @@ which gives the wheel its ``manylinux`` tag and puts it in
 ``vtk-build/wheelhouse``.
 Files written by the container are handed back to your user, even when
 the build fails. Pass another image with ``--manylinux-image``. With
-``--compiler-cache`` the container installs ``ccache``, whichever cache
-was asked for, and keeps it between runs. A build tree configured inside
+``--compiler-cache auto`` or ``ccache`` the container installs
+``ccache`` and keeps its cache between runs. ``sccache`` is not
+available there. A build tree configured inside
 the container cannot be continued outside it.
 On a Linux host the install step runs afterwards. On macOS and Windows
 the wheel is only written, since it is for Linux.
@@ -196,7 +216,7 @@ Tooling
 What the command looks for and offers to install:
 
 - `git <https://git-scm.com/>`_ clones the source and checks out the
-  requested tag, branch or commit. Never installed by the command.
+  requested tag, branch, or commit. Never installed by the command.
 - `CMake <https://cmake.org/>`_ configures the build: it reads VTK's
   ``CMakeLists.txt`` and the options chosen, finds the compiler and
   Python, and writes the build files. Installed with ``pip`` when
@@ -206,8 +226,13 @@ What the command looks for and offers to install:
   rebuilds what changed. Installed with ``pip`` when missing.
 - **A C++ compiler**: GCC or Clang on Linux, Xcode's command-line tools
   on macOS, Visual Studio with the C++ workload on Windows. Never
-  installed by the command; a missing one stops with the instructions
+  installed by the command. A missing one stops with the instructions
   for your operating system.
+- **Development headers on Linux** for Python, OpenGL, and X11:
+  ``sudo apt install python3-dev libgl1-mesa-dev libx11-dev libxcursor-dev``
+  on Debian and Ubuntu, or ``sudo dnf install python3-devel
+  mesa-libGL-devel libX11-devel libXcursor-devel`` on Fedora. The tool
+  check cannot see them, so a missing one stops ``cmake`` instead.
 - `ccache <https://ccache.dev/>`_ and `sccache
   <https://github.com/mozilla/sccache>`_ are compiler caches: they store
   each object file keyed by its inputs, so rebuilding after an edit or a
@@ -221,7 +246,7 @@ What the command looks for and offers to install:
   into the wheel itself and set the platform tag, so it installs on
   other machines: `auditwheel
   <https://github.com/pypa/auditwheel>`_ on Linux, `delocate
-  <https://github.com/matthew-brett/delocate>`_ on macOS and `delvewheel
+  <https://github.com/matthew-brett/delocate>`_ on macOS, and `delvewheel
   <https://github.com/adang1345/delvewheel>`_ on Windows. Installed with
   ``pip`` when missing.
 - `setuptools <https://setuptools.pypa.io/>`_ and `wheel

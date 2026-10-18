@@ -329,9 +329,16 @@ class Builder:
         """
         cfg = self.config
         manifest = self._planned_manifest()
-        if (cfg.src_dir / '.git').exists():
+        if cfg.source is not None:
+            source = f'build the checkout at {cfg.source}, local edits kept'
+        elif (cfg.src_dir / '.git').exists():
+            if not cfg.prompting and (msg := self._unused_url()):
+                raise BuildError(msg)
             source = f'reuse the checkout at {cfg.src_dir}, local edits kept'
-            if cfg.ref:
+        if cfg.source is not None or (cfg.src_dir / '.git').exists():
+            if cfg.update:
+                source += f'. --update fetches, then checks out {cfg.ref or "the release tag"}'
+            elif cfg.ref:
                 source += f', checked out at {cfg.ref}'
         else:
             url = cfg.url or BACKENDS.get(cfg.backend) or (manifest.url if manifest else None)
@@ -365,13 +372,23 @@ class Builder:
             options_text = f'module groups {", ".join(groups) or "(none)"}'
             if values:
                 options_text += '. Options ' + ', '.join(f'{k}={v}' for k, v in values.items())
-        configure = f'cmake, {cfg.build_type} build with Ninja, into {cfg.cmake_dir}'
+        options_text += '. --with, --without, --all, --minimal, and --opt NAME=VALUE change them'
+        configure = (
+            f'cmake, {cfg.build_type} build (--build-type) with Ninja, into {cfg.cmake_dir}'
+        )
+        if cfg.clean:
+            configure = f'delete {cfg.cmake_dir} (--clean), then ' + configure
         if cfg.defines:
             configure += ', plus ' + ' '.join(f'-D{d}' for d in cfg.defines)
         cache = {'none': 'off', 'auto': 'ccache or sccache, whichever is on PATH'}
-        configure += f'. Compiler cache: {cache.get(cfg.compiler_cache, cfg.compiler_cache)}'
+        configure += (
+            f'. Compiler cache (--compiler-cache): '
+            f'{cache.get(cfg.compiler_cache, cfg.compiler_cache)}'
+        )
         jobs = cfg.jobs or os.cpu_count() or 1
-        build = f'compile with {jobs} parallel jobs, logging to {cfg.build_dir / "build.log"}'
+        build = (
+            f'compile with {jobs} parallel jobs (--jobs), logging to {cfg.build_dir / "build.log"}'
+        )
         wheel = f'package the wheel with setup.py bdist_wheel into {cfg.dist_dir}'
         if cfg.repair:
             repairer = _tools.required_tools(cfg.os_name, {}, repair=True)[-1].name
@@ -400,7 +417,7 @@ class Builder:
     def confirm_start(self) -> None:
         """Say where the build goes and ask before the first step; ``--yes`` answers yes."""
         cfg = self.config
-        where = 'Build tree and wheel go' if cfg.source else 'Source, build tree and wheel go'
+        where = 'Build tree and wheel go' if cfg.source else 'Source, build tree, and wheel go'
         self.say(
             f'{where} in [bold]{escape(str(cfg.build_dir))}[/bold]. '
             'Compiling takes from minutes to over an hour and needs several GB of disk.'
@@ -693,16 +710,13 @@ class Builder:
         """
         cfg = self.config
         if not cfg.prompting:
-            if cfg.url is not None:
-                self.say(
-                    f'[yellow]--url is not used: the checkout at {cfg.src_dir} is reused. '
-                    'Pass --build-dir to clone the URL somewhere else.[/yellow]'
-                )
+            if msg := self._unused_url():
+                raise BuildError(msg)
             return False
         self.say(
-            f'A checkout already exists at [bold]{cfg.src_dir}[/bold]. Answer y to build it '
-            'as is, a git URL (https://... or git@...) to delete it and clone that fork in '
-            'its place, or the path of a local checkout to build that one.'
+            f'A checkout already exists at [bold]{escape(str(cfg.src_dir))}[/bold]. Answer y '
+            'to build it as is, a git URL (https://... or git@...) to delete it and clone that '
+            'fork in its place, or the path of a local checkout to build that one.'
         )
         source, typed_url = self._ask_source(
             'Reuse it?',
@@ -713,7 +727,7 @@ class Builder:
             return False
         if not typed_url:
             return False
-        self.say(f'[yellow]{cfg.src_dir} will be deleted and cloned again.[/yellow]')
+        self.say(f'[yellow]{escape(str(cfg.src_dir))} will be deleted and cloned again.[/yellow]')
         if not self.confirm('Delete it? (n stops and keeps it)', default=False):
             msg = 'Keeping the existing checkout. Run again to build it, or pass --build-dir.'
             raise BuildError(msg)
@@ -804,6 +818,23 @@ class Builder:
             f'Check out {ref!r} in {src}? (n keeps the commit that is checked out)'
         ):
             self.git('-c', 'advice.detachedHead=false', 'checkout', ref, cwd=src)
+
+    def _unused_url(self) -> str | None:
+        """Return why ``--url`` cannot apply to the checkout in the build tree, or ``None``."""
+        cfg = self.config
+        if cfg.url is None:
+            return None
+        try:
+            origin = self.git('remote', 'get-url', 'origin', cwd=cfg.src_dir, capture=True)
+        except (OSError, subprocess.CalledProcessError):
+            origin = None
+        if origin == cfg.url:
+            return None
+        return (
+            f'--url is not used: a checkout of {origin or "another URL"} already exists at '
+            f'{cfg.src_dir}. Pass --build-dir to clone the URL somewhere else, or delete the '
+            'checkout.'
+        )
 
     def _has_ref(self, src: Path, ref: str) -> bool:
         """Return whether ``ref`` names a commit in the checkout."""
@@ -1362,16 +1393,19 @@ class Builder:
         )
         if cache != cfg.compiler_cache:
             self._apply_configure_flags(f'--compiler-cache {cache}')
-        cfg.version_suffix = Prompt.ask(
-            'Version suffix, e.g. dev0+gabc12345 (empty for a release version)',
-            default=self.version_suffix() or '',
+        suffix = Prompt.ask(
+            'Version suffix, e.g. dev0+gabc12345 (- for a release version)',
+            default=self.version_suffix() or '-',
             console=self.console,
         )
+        cfg.version_suffix = '' if suffix.strip() == '-' else suffix
         raw = Prompt.ask(
-            'Extra CMake cache entries, KEY=VALUE separated by spaces (empty for none)',
-            default=shlex.join(cfg.defines),
+            'Extra CMake cache entries, KEY=VALUE separated by spaces (- for none)',
+            default=shlex.join(cfg.defines) or '-',
             console=self.console,
         )
+        if raw.strip() == '-':
+            raw = ''
         try:
             cfg.defines = shlex.split(raw)
         except ValueError as err:
@@ -1605,7 +1639,7 @@ class Builder:
             self.say(f'No pip or uv found; install the wheel yourself: {escape(str(wheel))}')
             return
         wanted = cfg.install or self.confirm(
-            f'Install {wheel.name} into {sys.prefix}? (n leaves it in the wheelhouse)',
+            f'Install {wheel.name} into {sys.prefix}? (n leaves it where it is)',
             default=False,
         )
         if not wanted:
@@ -1631,12 +1665,14 @@ class Builder:
             f'The build runs inside the [bold]{image}[/bold] container through Docker, so '
             'the wheel is portable across Linux machines. The source is prepared here, then '
             'the container installs the build dependencies and runs the remaining steps with '
-            f'[bold]{cfg.build_dir}[/bold] mounted as its build tree.'
+            f'[bold]{escape(str(cfg.build_dir))}[/bold] mounted as its build tree.'
         )
         docker = _tools.Tool('docker', ('docker',), instructions=_manylinux.DOCKER_INSTRUCTIONS)
         if not _tools.detect(docker, self.env):
             msg = f'docker was not found on PATH. {docker.instructions}'
-            raise BuildError(msg)
+            if not cfg.dry_run:
+                raise BuildError(msg)
+            self.say(f'[yellow]{escape(msg)}[/yellow]')
         if not cfg.dry_run:
             probe = subprocess.run([str(docker.path), 'info'], capture_output=True, check=False)
             if probe.returncode != 0:

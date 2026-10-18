@@ -177,8 +177,6 @@ The following are a list of optional dependencies and their purpose:
 
 .. _vtk_backend:
 
-.. _vtk_backend_install:
-
 VTK Backend
 ~~~~~~~~~~~
 
