@@ -15,6 +15,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from typing import TYPE_CHECKING
 
 from rich.console import Console
@@ -162,6 +163,7 @@ class BuildConfig:
     interactive: bool = False
     dry_run: bool = False
     manylinux: str | None = None
+    in_container: bool = False
     os_name: str = field(default_factory=_tools.host_os)
 
     @property
@@ -293,7 +295,7 @@ class Builder:
         if not sys.stdin.isatty():
             msg = 'Pass --yes to install these, or install them yourself and run again.'
             raise BuildError(msg)
-        if not Confirm.ask('Install them?', default=True, console=self.console):
+        if not Confirm.ask('Install them? (n stops)', default=True, console=self.console):
             msg = 'Nothing was installed; install them yourself and run again.'
             raise BuildError(msg)
 
@@ -308,6 +310,13 @@ class Builder:
         except ManifestError:
             pass
         return None
+
+    def _unknown_backend(self) -> str:
+        """Return the error for a backend with no known URL."""
+        return (
+            f'Unknown backend {self.config.backend!r}. Known backends: {known_backends()}. '
+            'Pass --url <git url> or --source <checkout> to build another one.'
+        )
 
     def plan(self) -> list[tuple[str, str]]:
         """Describe what each step will do, before any of them runs.
@@ -326,15 +335,17 @@ class Builder:
                 source += f', checked out at {cfg.ref}'
         else:
             url = cfg.url or BACKENDS.get(cfg.backend) or (manifest.url if manifest else None)
+            if url is None:
+                raise BuildError(self._unknown_backend())
             ref = cfg.ref or (manifest.default_ref if manifest else None) or 'the default branch'
             source = f'clone {url} at {ref} into {cfg.src_dir}'
         tools = _tools.required_tools(
             cfg.os_name, manifest.tools if manifest else {}, repair=cfg.repair
         )
         names = ', '.join([t.label for t in tools] + list(_tools.PYTHON_BUILD_PACKAGES))
+        when = 'without asking (--yes)' if cfg.yes else 'only after one more confirmation'
         tools_text = (
-            f'check {names}. Anything missing is listed and installed into {sys.prefix} '
-            'only after one more confirmation'
+            f'check {names}. Anything missing is listed and installed into {sys.prefix} {when}'
         )
         if manifest is None:
             options_text = "the default module groups and options from the checkout's manifest"
@@ -389,12 +400,15 @@ class Builder:
     def confirm_start(self) -> None:
         """Say where the build goes and ask before the first step; ``--yes`` answers yes."""
         cfg = self.config
+        where = 'Build tree and wheel go' if cfg.source else 'Source, build tree and wheel go'
         self.say(
-            f'Source, build tree and wheel go in [bold]{escape(str(cfg.build_dir))}[/bold]. '
+            f'{where} in [bold]{escape(str(cfg.build_dir))}[/bold]. '
             'Compiling takes from minutes to over an hour and needs several GB of disk.'
         )
-        if (cfg.yes or cfg.dry_run) and not cfg.prompting:
-            self.confirm('Proceed? (n stops)')
+        if cfg.yes or cfg.dry_run:
+            if cfg.interactive:
+                why = '--yes' if cfg.yes else 'dry run'
+                self.say(f'[dim]Proceed? (n stops) -> yes ({why})[/dim]')
             return
         if not sys.stdin.isatty():
             msg = 'Pass --yes to build without a terminal.'
@@ -475,7 +489,7 @@ class Builder:
                 if not _NOISY_BUILD_LINE.search(line):
                     self.console.out(line, end='', highlight=False)
         if proc.returncode != 0:
-            self.say(f'[red]Build failed; the full log is in {log}[/red]')
+            self.say(f'[red]Build failed; the full log is in {escape(str(log))}[/red]')
         return proc.returncode
 
     def git(self, *args: str, cwd: Path | None = None, capture: bool = False) -> str:
@@ -551,7 +565,7 @@ class Builder:
         )
         if self.config.manylinux:
             return self.build_in_manylinux()
-        if self.config.interactive:
+        if self.config.prompting:
             self.say(
                 'Eight steps: source, tools, build options, configure, build, wheel, repair, '
                 'and install.'
@@ -566,7 +580,8 @@ class Builder:
                 'takes the default shown in parentheses, and each question says what n and any '
                 'other answer do. Ctrl-C stops at any time.'
             )
-        self.confirm_start()
+        if not self.config.in_container:
+            self.confirm_start()
         self.phase_source()
         self.phase_tools()
         self.phase_groups()
@@ -574,8 +589,9 @@ class Builder:
         self.phase_build()
         self.phase_wheel()
         self.phase_repair()
-        self.phase_install()
-        self.summary()
+        if not self.config.in_container:
+            self.phase_install()
+            self.summary()
         return self.wheel
 
     def phase_source(self) -> None:
@@ -604,18 +620,15 @@ class Builder:
             if not (cfg.source / '.git').exists():
                 msg = f'--source {cfg.source} is not a git checkout.'
                 raise BuildError(msg)
-            self.say(f'Using the existing checkout at [bold]{cfg.source}[/bold].')
+            self.say(f'Using the existing checkout at [bold]{escape(str(cfg.source))}[/bold].')
             self._existing_checkout(cfg.source)
         elif (cfg.src_dir / '.git').exists() and not (replacing := self._replace_checkout()):
-            self.say(f'Reusing the checkout at [bold]{cfg.src_dir}[/bold]; local edits are kept.')
+            where = escape(str(cfg.src_dir))
+            self.say(f'Reusing the checkout at [bold]{where}[/bold]; local edits are kept.')
             self._existing_checkout(cfg.src_dir)
         else:
             if url is None:
-                msg = (
-                    f'Unknown backend {cfg.backend!r}. Known backends: {known_backends()}. '
-                    'Pass --url <git url> or --source <checkout> to build another one.'
-                )
-                raise BuildError(msg)
+                raise BuildError(self._unknown_backend())
             ref = cfg.ref
             if ref is None and shipped is not None:
                 ref = find_manifest(cfg.backend, None).default_ref
@@ -627,9 +640,9 @@ class Builder:
                 raise BuildError(msg)
             if not replacing:
                 self.say(
-                    f'The source will be cloned from [bold]{url}[/bold] into '
-                    f'[bold]{cfg.src_dir}[/bold] (blob-less partial clone: history without '
-                    'file contents until needed).'
+                    f'The source will be cloned from [bold]{escape(url)}[/bold] into [bold]'
+                    f'{escape(str(cfg.src_dir))}[/bold] (blob-less partial clone: history '
+                    'without file contents until needed).'
                 )
                 if cfg.prompting:
                     self.say(
@@ -667,7 +680,7 @@ class Builder:
             raise BuildError(msg)
         source = cfg.src_dir if cfg.src_dir.exists() else None
         self._manifest = find_manifest(cfg.backend, source)
-        self.say(f'Manifest: [bold]{self.manifest.path}[/bold]')
+        self.say(f'Manifest: [bold]{escape(str(self.manifest.path))}[/bold]')
 
     def _replace_checkout(self) -> bool:
         """Ask whether to keep the checkout in the build tree or replace it.
@@ -771,7 +784,9 @@ class Builder:
         if not cfg.update and (cfg.ref is None or self._at_ref(src, cfg.ref)):
             return
         try:
-            dirty = self.git('status', '--porcelain', cwd=src, capture=True)
+            dirty = self.git(
+                'status', '--porcelain', '--untracked-files=no', cwd=src, capture=True
+            )
         except subprocess.CalledProcessError as err:
             msg = f'git status failed in {src}: {(err.stderr or "").strip()}'
             raise BuildError(msg) from None
@@ -783,10 +798,22 @@ class Builder:
         ref = cfg.ref
         if ref is None:
             ref = find_manifest(cfg.backend, src).default_ref
+        if cfg.update and self._has_ref(src, f'origin/{ref}'):
+            ref = f'origin/{ref}'
         if cfg.update or self.confirm(
             f'Check out {ref!r} in {src}? (n keeps the commit that is checked out)'
         ):
             self.git('-c', 'advice.detachedHead=false', 'checkout', ref, cwd=src)
+
+    def _has_ref(self, src: Path, ref: str) -> bool:
+        """Return whether ``ref`` names a commit in the checkout."""
+        try:
+            self.git(
+                'rev-parse', '--verify', '--quiet', f'{ref}^{{commit}}', cwd=src, capture=True
+            )
+        except subprocess.CalledProcessError:
+            return False
+        return True
 
     def _at_ref(self, src: Path, ref: str) -> bool:
         """Return whether a checkout's HEAD is already the commit ``ref`` names."""
@@ -831,6 +858,12 @@ class Builder:
                 table.add_row(f'{name} (python)', sys.prefix, '[green]ok[/green]')
         table.add_row(*self._compiler_cache_row())
         self.console.print(table)
+        choice = cfg.compiler_cache
+        if choice not in ('none', 'auto') and not _tools.compiler_cache_tool(
+            choice, cfg.os_name, self.env
+        ):
+            hint = _tools.compiler_cache_instructions(cfg.os_name, choice)
+            blocking.append(_tools.Tool(choice, (choice,), instructions=hint))
         if blocking:
             lines = [f'{t.name}: {t.instructions}' for t in blocking]
             msg = 'Install these and run again:\n  ' + '\n  '.join(lines)
@@ -869,10 +902,7 @@ class Builder:
         self.say(
             f'Visual Studio found; importing its build environment from [bold]{vcvarsall}[/bold].'
         )
-        if (
-            self.confirm('Import it? (n keeps the current environment)')
-            and not self.config.dry_run
-        ):
+        if self.confirm('Import it? (n keeps the current environment)'):
             try:
                 self.env = _tools.msvc_environment(vcvarsall, env=self.env)
             except subprocess.CalledProcessError as err:
@@ -909,7 +939,7 @@ class Builder:
 
         """
         if self.config.cache_dir is None and self.env.get(var):
-            return Path(self.env[var])
+            return Path(self.env[var]).resolve()
         return self.config.compiler_cache_dir
 
     def _activate_compiler_cache(self) -> None:
@@ -920,7 +950,7 @@ class Builder:
             return
         self.launcher = _tools.compiler_cache_tool(cfg.compiler_cache, cfg.os_name, self.env)
         if self.launcher is None:
-            hint = _tools.compiler_cache_instructions(cfg.os_name)
+            hint = _tools.compiler_cache_instructions(cfg.os_name, cfg.compiler_cache)
             if cfg.compiler_cache != 'auto':
                 msg = f'{cfg.compiler_cache} was not found on PATH. Install it: {hint}'
                 raise BuildError(msg)
@@ -936,7 +966,10 @@ class Builder:
         if self.launcher.name == 'ccache':
             if cfg.os_name != 'windows':
                 self.env.setdefault('CCACHE_COMPILERCHECK', '%compiler% --version')
-            base = Path(os.path.commonpath([cfg.src_dir.resolve(), cfg.cmake_dir.resolve()]))
+            try:
+                base = Path(os.path.commonpath([cfg.src_dir.resolve(), cfg.cmake_dir.resolve()]))
+            except ValueError:
+                base = Path(cfg.cmake_dir.resolve().anchor)
             if base != Path(base.anchor):
                 self.env.setdefault('CCACHE_BASEDIR', str(base))
                 self.env.setdefault('CCACHE_NOHASHDIR', '1')
@@ -1248,7 +1281,7 @@ class Builder:
         cfg = self.config
         self.step('4/8 Configure')
         if cfg.clean and cfg.cmake_dir.exists():
-            self.say(f'--clean removes [bold]{cfg.cmake_dir}[/bold].')
+            self.say(f'--clean removes [bold]{escape(str(cfg.cmake_dir))}[/bold].')
             if self.confirm('Delete it? (n keeps it and configures in place)') and not cfg.dry_run:
                 shutil.rmtree(cfg.cmake_dir)
         cmd = self.configure_command()
@@ -1258,7 +1291,7 @@ class Builder:
         stored = self._stored_state() if configured else None
         if configured and not cfg.reconfigure and stored == state:
             self.say(
-                f'[bold]{cfg.cmake_dir}[/bold] is already configured; skipping '
+                f'[bold]{escape(str(cfg.cmake_dir))}[/bold] is already configured; skipping '
                 '(use --reconfigure).'
             )
             return
@@ -1453,18 +1486,21 @@ class Builder:
         if cfg.os_name != 'macos':
             return {}
         arch = platform.machine()
-        prefix = 'CMAKE_OSX_DEPLOYMENT_TARGET='
         targets = [
-            e[len(prefix) :] for e in self.manifest.cmake_os['macos'] if e.startswith(prefix)
+            value
+            for key, _, value in (
+                e.partition('=') for e in [*self.manifest.cmake_os['macos'], *cfg.defines]
+            )
+            if key.split(':')[0] == 'CMAKE_OSX_DEPLOYMENT_TARGET'
         ]
-        target = targets[0] if targets else '11.0'
+        target = targets[-1] if targets else '11.0'
         return {'_PYTHON_HOST_PLATFORM': f'macosx-{target}-{arch}', 'ARCHFLAGS': f'-arch {arch}'}
 
     def phase_wheel(self) -> None:
         """Package the build tree into a wheel."""
         cfg = self.config
         self.step('6/8 Wheel')
-        self.say(f'The wheel is written to [bold]{cfg.dist_dir}[/bold].')
+        self.say(f'The wheel is written to [bold]{escape(str(cfg.dist_dir))}[/bold].')
         if not self.confirm('Build the wheel? (n stops)'):
             msg = 'Stopped before packaging.'
             raise BuildError(msg)
@@ -1472,13 +1508,15 @@ class Builder:
         self.hooks('post_wheel')
         self.wheel = self._newest_wheel(cfg.dist_dir)
 
-    def _newest_wheel(self, folder: Path) -> Path | None:
-        """Return the most recently written wheel in a folder."""
+    def _newest_wheel(self, folder: Path, *, since: float | None = None) -> Path | None:
+        """Return the most recently written wheel in a folder, optionally newer than ``since``."""
         wheels = sorted(folder.glob('*.whl'), key=lambda p: p.stat().st_mtime)
+        if since is not None:
+            wheels = [w for w in wheels if w.stat().st_mtime >= since]
         if not wheels:
             if self.config.dry_run:
                 return None
-            msg = f'No wheel found in {folder}.'
+            msg = f'No new wheel found in {folder}.' if since else f'No wheel found in {folder}.'
             raise BuildError(msg)
         return wheels[-1]
 
@@ -1564,7 +1602,7 @@ class Builder:
         )
         cmd = self.install_command(wheel)
         if cmd is None:
-            self.say(f'No pip or uv found; install the wheel yourself: {wheel}')
+            self.say(f'No pip or uv found; install the wheel yourself: {escape(str(wheel))}')
             return
         wanted = cfg.install or self.confirm(
             f'Install {wheel.name} into {sys.prefix}? (n leaves it in the wheelhouse)',
@@ -1636,9 +1674,11 @@ class Builder:
             for inside, folder in mounts.items():
                 if inside != package_mount:
                     folder.mkdir(parents=True, exist_ok=True)
+        started = time.time()
         self.run(cmd)
         if not cfg.dry_run:
-            self.wheel = self._newest_wheel(cfg.wheelhouse if cfg.repair else cfg.dist_dir)
+            folder = cfg.wheelhouse if cfg.repair else cfg.dist_dir
+            self.wheel = self._newest_wheel(folder, since=started)
         if cfg.os_name == 'linux':
             self.phase_install()
         else:
@@ -1678,6 +1718,7 @@ class Builder:
             'install': False,
             'yes': True,
             'interactive': cfg.prompting,
+            'in_container': True,
             'os_name': 'linux',
             'compiler_cache': cfg.compiler_cache,
             'cache_dir': _manylinux.CACHE if cache else None,
@@ -1688,6 +1729,6 @@ class Builder:
         cfg = self.config
         self.console.rule('[bold green]Done')
         if self.wheel is not None:
-            self.say(f'Wheel: [bold]{self.wheel}[/bold]')
-        self.say(f'Source: {cfg.src_dir}\nBuild tree: {cfg.cmake_dir}')
+            self.say(f'Wheel: [bold]{escape(str(self.wheel))}[/bold]')
+        self.say(f'Source: {escape(str(cfg.src_dir))}\nBuild tree: {escape(str(cfg.cmake_dir))}')
         self.say('Edit the source and run the same command again for an incremental rebuild.')

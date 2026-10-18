@@ -442,7 +442,9 @@ def test_existing_checkout_declined(tmp_path: Path, mocker: MockerFixture):
 def test_interactive_selection_parse_errors(tmp_path: Path, mocker: MockerFixture):
     """An unbalanced quote or a clashing flag is reported and leaves the selection as it was."""
     mocker.patch.object(phases.sys.stdin, 'isatty', return_value=True)
-    answers = iter(['y', '--with "web', '--minimal', '--all', ''])
+    answers = iter(
+        ['y', '--with "web', '--minimal', '--with headless-egl --with headless-osmesa', '']
+    )
     mocker.patch.object(
         phases.Prompt, 'ask', side_effect=lambda *_, default='', **__: next(answers) or default
     )

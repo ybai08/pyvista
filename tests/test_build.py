@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from typing import TYPE_CHECKING
@@ -129,7 +130,7 @@ def test_vtk_manifest_defaults_match_ci_flags(os_name):
         'VTK_MODULE_ENABLE_VTK_WebCore=YES',
         'VTK_MODULE_ENABLE_VTK_WebGLExporter=YES',
         'VTK_MODULE_ENABLE_VTK_WebPython=YES',
-        'VTK_SMP_IMPLEMENTATION_TYPE=STDThread',
+        'VTK_SMP_IMPLEMENTATION_TYPE=Sequential',
     }
     if os_name == 'macos':
         ci_flags.add('CMAKE_OSX_DEPLOYMENT_TARGET=11.0')
@@ -145,8 +146,9 @@ def test_resolve_groups_defaults(demo):
 
 
 def test_resolve_groups_errors(demo):
+    assert resolve_groups(demo, 'linux', all_=True) == ['a', 'b', 'core']
     with pytest.raises(ManifestError, match='conflicts'):
-        resolve_groups(demo, 'linux', all_=True)
+        resolve_groups(demo, 'linux', with_=['b', 'c'])
     with pytest.raises(ManifestError, match='required'):
         resolve_groups(demo, 'linux', without=['core'])
     with pytest.raises(ManifestError, match='Unknown group'):
@@ -418,8 +420,13 @@ def test_too_old_tool(tmp_path: Path, mocker: MockerFixture):
 @pytest.mark.usefixtures('no_tools')
 def test_explicit_cache_missing(tmp_path: Path, mocker: MockerFixture):
     mocker.patch.object(tools, 'compiler_cache_tool', return_value=None)
-    with pytest.raises(BuildError, match='sccache was not found'):
+    install = mocker.patch.object(tools, 'pip_install_command')
+    with pytest.raises(BuildError, match='sccache: pip install sccache'):
         Builder(_config(tmp_path, compiler_cache='sccache'), Console(quiet=True)).build()
+    assert not install.called
+    builder = Builder(_config(tmp_path, compiler_cache='ccache'), Console(quiet=True))
+    with pytest.raises(BuildError, match='ccache was not found on PATH'):
+        builder._activate_compiler_cache()
 
 
 @pytest.mark.usefixtures('no_tools')
@@ -699,7 +706,7 @@ def test_existing_checkout_update_and_ref(tmp_path: Path, mocker: MockerFixture)
     builder._existing_checkout(src)
     calls = [c.args for c in git.call_args_list]
     assert ('fetch', '--tags', 'origin') in calls
-    assert any('checkout' in c and 'v9.7.1' in c for c in calls)
+    assert any('checkout' in c and 'origin/v9.7.1' in c for c in calls)
     builder = _builder(tmp_path, mocker, source=src, ref='main')
     git = mocker.patch.object(
         builder, 'git', side_effect=lambda *a, **_: a[-1] if a[0] == 'rev-parse' else ''
@@ -998,9 +1005,16 @@ def test_tool_helpers(mocker: MockerFixture):
         return_value=subprocess.CompletedProcess([], 0, stdout='no digits'),
     )
     assert tools.executable_version('x') is None
-    for os_name in OS_NAMES:
-        assert tools.compiler_cache_instructions(os_name)
-        assert tools.compiler_instructions(os_name)
+    hints = {
+        (os_name, name): tools.compiler_cache_instructions(os_name, name)
+        for os_name in OS_NAMES
+        for name in ('auto', 'ccache', 'sccache')
+    }
+    assert all('sccache' in hints[os_name, 'sccache'] for os_name in OS_NAMES)
+    assert hints['windows', 'ccache'] == 'choco install ccache'
+    assert hints['macos', 'auto'] == 'brew install ccache'
+    assert 'sccache' in hints['windows', 'auto']
+    assert all(tools.compiler_instructions(os_name) for os_name in OS_NAMES)
     tool = tools.Tool('t', ('t',), spec='>=1')
     mocker.patch.object(tools.shutil, 'which', return_value='/usr/bin/t')
     mocker.patch.object(tools, 'executable_version', return_value=None)
@@ -1057,7 +1071,7 @@ def test_intro_explains_and_asks(tmp_path: Path, mocker: MockerFixture):
     console = Console(record=True, width=4000, force_terminal=False)
     Builder(_config(tmp_path, interactive=True), console).build()
     out = console.export_text()
-    assert out.splitlines()[1].startswith('Eight steps: source, tools')
+    assert out.splitlines()[1] == 'The build runs these eight steps:'
     assert 'asks before running' not in out
     assert out.index('Proceed?') < out.index('1/8 Source')
     mocker.patch.object(phases.sys.stdin, 'isatty', return_value=True)
@@ -1079,7 +1093,7 @@ def test_intro_explains_and_asks(tmp_path: Path, mocker: MockerFixture):
         ({'interactive': True}, False, None, 'Pass --yes'),
         ({}, True, True, None),
         ({}, True, False, 'Stopped before the first step'),
-        ({'yes': True, 'interactive': True}, True, False, 'Stopped before the first step'),
+        ({'yes': True, 'interactive': True}, True, None, None),
     ],
 )
 def test_confirm_start(tmp_path: Path, mocker: MockerFixture, kwargs, tty, answer, error):
@@ -1297,7 +1311,10 @@ def test_manylinux_helpers(tmp_path: Path, mocker: MockerFixture):
         paths=['/work', '/cache'],
     )
     lines = script.splitlines()
-    assert lines[:2] == ['set -euo pipefail', "trap 'chown -R 1000:1000 /work /cache' EXIT"]
+    assert lines[:2] == [
+        'set -euo pipefail',
+        "trap 'chown -R 1000:1000 /work /cache || true' EXIT",
+    ]
     assert 'dnf install -y --setopt=install_weak_deps=False a-devel b' in script
     assert "git config --global --add safe.directory '*'" in script
     assert 'yum install -y a-devel b' in script
@@ -1343,6 +1360,7 @@ def test_manylinux_helpers(tmp_path: Path, mocker: MockerFixture):
 
 
 def test_build_in_manylinux(tmp_path: Path, mocker: MockerFixture):
+    mocker.patch.object(phases.time, 'time', return_value=0.0)
     mocker.patch.object(tools.shutil, 'which', side_effect=lambda name, **_: f'/usr/bin/{name}')
     mocker.patch.object(manylinux, 'pyvista_package', return_value=tmp_path / 'pv')
     mocker.patch.object(manylinux, 'pyvista_requirements', return_value=['numpy'])
@@ -1386,7 +1404,7 @@ def test_build_in_manylinux(tmp_path: Path, mocker: MockerFixture):
     assert cmd[cmd.index('bash') - 1] == 'img'
     script = cmd[-1]
     assert 'libX11-devel' in script
-    assert "trap 'chown -R 7:7 /work /src /cache' EXIT" in script
+    assert "trap 'chown -R 7:7 /work /src /cache || true' EXIT" in script
     config = builder.container_config()
     assert shlex.quote(json.dumps(config)) in script
     assert config == {
@@ -1408,6 +1426,7 @@ def test_build_in_manylinux(tmp_path: Path, mocker: MockerFixture):
         'install': False,
         'yes': True,
         'interactive': False,
+        'in_container': True,
         'os_name': 'linux',
         'compiler_cache': 'auto',
         'cache_dir': '/cache',
@@ -1518,6 +1537,7 @@ def test_windows_declined_msvc(tmp_path: Path, mocker: MockerFixture):
 
 
 def test_build_in_manylinux_forwarded_args(tmp_path: Path, mocker: MockerFixture):
+    mocker.patch.object(phases.time, 'time', return_value=0.0)
     mocker.patch.object(tools.shutil, 'which', side_effect=lambda name, **_: f'/usr/bin/{name}')
     mocker.patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 0))
     cfg = _config(
@@ -1694,3 +1714,128 @@ def test_narration_highlighter():
         'v9.7.1': 'cyan',
         '15': 'cyan',
     }
+
+
+def test_update_follows_the_remote_branch(tmp_path: Path, mocker: MockerFixture):
+    """``--update`` on a branch ref checks out the fetched commit, not the stale local branch."""
+
+    def git(*args, cwd):
+        return subprocess.run(
+            [str(shutil.which('git')), '-c', 'user.name=t', '-c', 'user.email=t@t', *args],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    origin = tmp_path / 'origin'
+    origin.mkdir()
+    git('init', '-q', '-b', 'main', cwd=origin)
+    git('commit', '-q', '--allow-empty', '-m', 'one', cwd=origin)
+    git('clone', '-q', str(origin), str(tmp_path / 'src'), cwd=tmp_path)
+    git('commit', '-q', '--allow-empty', '-m', 'two', cwd=origin)
+    builder = _builder(tmp_path, mocker, source=tmp_path / 'src', update=True, ref='main')
+    builder._existing_checkout(tmp_path / 'src')
+    assert git('rev-parse', 'HEAD', cwd=tmp_path / 'src') == git('rev-parse', 'HEAD', cwd=origin)
+    (tmp_path / 'src' / 'notes.txt').write_text('mine')
+    git('tag', 'v1', cwd=origin)
+    builder.config.ref = 'v1'
+    builder._existing_checkout(tmp_path / 'src')
+    assert git('describe', '--tags', cwd=tmp_path / 'src') == 'v1'
+
+
+def test_tools_table_is_validated():
+    """Unknown tools and malformed version specifiers are manifest errors."""
+    with pytest.raises(ManifestError, match=r'\[tools\]'):
+        parse_manifest(dict(MINIMAL_MANIFEST, tools={'cmak': '>=3'}))
+    with pytest.raises(ManifestError, match='not a version specifier'):
+        parse_manifest(dict(MINIMAL_MANIFEST, tools={'cmake': '3.22'}))
+
+
+def test_plan_rejects_unknown_backend(tmp_path: Path):
+    """The start summary fails on a backend with no URL before asking to proceed."""
+    builder = Builder(_config(tmp_path, backend='nosuch'), Console(quiet=True))
+    with pytest.raises(BuildError, match='Unknown backend'):
+        builder.plan()
+    with pytest.raises(BuildError, match='Unknown backend'):
+        builder.phase_source()
+
+
+def test_plan_wording_under_yes_and_source(tmp_path: Path, mocker: MockerFixture):
+    """``--yes`` and ``--source`` change what the summary promises."""
+    console = Console(record=True, width=4000, force_terminal=False)
+    builder = Builder(_config(tmp_path, yes=True, source=tmp_path / 'elsewhere'), console)
+    mocker.patch.object(builder, 'phase_source', side_effect=RuntimeError('started'))
+    with pytest.raises(RuntimeError):
+        builder.build()
+    out = console.export_text()
+    assert 'without asking (--yes)' in out
+    assert 'Build tree and wheel go in' in out
+
+
+def test_wheel_env_takes_the_define(tmp_path: Path, mocker: MockerFixture):
+    """A ``-D CMAKE_OSX_DEPLOYMENT_TARGET`` sets the wheel's platform tag."""
+    builder = _builder(
+        tmp_path, mocker, os_name='macos', defines=['CMAKE_OSX_DEPLOYMENT_TARGET:STRING=12.0']
+    )
+    assert builder.wheel_env()['_PYTHON_HOST_PLATFORM'].startswith('macosx-12.0-')
+
+
+def test_narration_escapes_paths(tmp_path: Path):
+    """Brackets in a path are printed, not read as markup."""
+    console = Console(record=True, width=4000, force_terminal=False)
+    cfg = _config(tmp_path, build_dir=tmp_path / 'b[x]')
+    Builder(cfg, console).summary()
+    assert 'b[x]' in console.export_text()
+
+
+def test_container_build_leaves_start_and_install_to_the_host(
+    tmp_path: Path, mocker: MockerFixture
+):
+    """Inside the container the build skips the start question, the install and the summary."""
+    builder = Builder(_config(tmp_path, in_container=True), Console(quiet=True))
+    calls = {
+        name: mocker.patch.object(builder, name)
+        for name in (
+            'confirm_start',
+            'phase_source',
+            'phase_tools',
+            'phase_groups',
+            'phase_configure',
+            'phase_build',
+            'phase_wheel',
+            'phase_repair',
+            'phase_install',
+            'summary',
+        )
+    }
+    builder.build()
+    assert not calls['confirm_start'].called
+    assert not calls['phase_install'].called
+    assert not calls['summary'].called
+    assert calls['phase_repair'].called
+    assert Builder(_config(tmp_path, manylinux='img'), Console(quiet=True)).container_config()[
+        'in_container'
+    ]
+
+
+def test_stale_wheel_is_not_taken(tmp_path: Path):
+    """A wheel older than the container run is not the build's wheel."""
+    cfg = _config(tmp_path, dry_run=False)
+    cfg.wheelhouse.mkdir(parents=True)
+    (cfg.wheelhouse / 'vtk-1-cp3-cp3-linux_x86_64.whl').write_text('')
+    builder = Builder(cfg, Console(quiet=True))
+    with pytest.raises(BuildError, match='No new wheel found'):
+        builder._newest_wheel(cfg.wheelhouse, since=10**12)
+
+
+def test_ccache_basedir_across_drives(tmp_path: Path, mocker: MockerFixture):
+    """Source and build on different drives set no ``CCACHE_BASEDIR``."""
+    mocker.patch.object(
+        tools, 'compiler_cache_tool', return_value=tools.Tool('ccache', ('ccache',))
+    )
+    mocker.patch.object(phases.os.path, 'commonpath', side_effect=ValueError)
+    builder = Builder(_config(tmp_path, compiler_cache='ccache'), Console(quiet=True))
+    builder.env.pop('CCACHE_BASEDIR', None)
+    builder._activate_compiler_cache()
+    assert 'CCACHE_BASEDIR' not in builder.env

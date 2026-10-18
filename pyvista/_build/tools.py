@@ -303,7 +303,7 @@ def compiler_cache_tool(
     return None
 
 
-def compiler_cache_instructions(os_name: str) -> str:
+def compiler_cache_instructions(os_name: str, name: str = 'auto') -> str:
     """Return how to install a compiler cache.
 
     Parameters
@@ -311,16 +311,21 @@ def compiler_cache_instructions(os_name: str) -> str:
     os_name : str
         Operating system name.
 
+    name : str, default: 'auto'
+        ``ccache``, ``sccache``, or ``auto`` for the usual one on this system.
+
     Returns
     -------
     str
         Installation instructions.
 
     """
+    if name == 'sccache' or (name == 'auto' and os_name == 'windows'):
+        return 'pip install sccache   (or: choco install sccache)'
     if os_name == 'macos':
         return 'brew install ccache'
     if os_name == 'windows':
-        return 'pip install sccache   (or: choco install sccache)'
+        return 'choco install ccache'
     return 'apt install ccache   (or: dnf install ccache)'
 
 

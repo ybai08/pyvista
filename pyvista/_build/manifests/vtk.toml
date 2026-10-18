@@ -88,5 +88,5 @@ os = ["linux"]
 [options.smp]
 choices = ["OpenMP", "STDThread", "Sequential", "TBB"]
 cmake = "VTK_SMP_IMPLEMENTATION_TYPE={value}"
-default = "STDThread" # threaded; VTK's own default and PyPI wheels use Sequential
+default = "Sequential" # VTK's own default, as in the PyPI wheels
 help = "Threading backend for SMP-enabled filters"
